@@ -1,0 +1,14 @@
+[Unit]
+Description=Todolist Web App
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/www/todolist
+ExecStart=/usr/bin/python3 /var/www/todolist/serve.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

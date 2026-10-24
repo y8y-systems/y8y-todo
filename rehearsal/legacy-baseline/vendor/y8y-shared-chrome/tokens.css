@@ -1,0 +1,132 @@
+/* ============================================================
+   y8y-chrome / tokens.css — 共享 y8y 设计 token（唯一来源，2026-08-27 建立）
+   主题默认跟随系统（prefers-color-scheme），由 theme.js 在 <head> pre-paint
+   把 data-theme 写到 <html>。:root 默认暗色（pre-paint 前、或 JS 关时回退）。
+   所有 y8y web 应用 `<link rel="stylesheet" href="chrome/tokens.css">` 即可
+   获得统一的颜色 token，不再各自复制一份。应用专属 token（chart/data 等）
+   可留在各自样式里，但核心 UI token 一律用这份。
+
+   ── 字体（2026-09-23 定案：字体也必须全站统一共享）──────────────────
+   物理文件唯一源 = /var/lib/todolist-legacy/shared/chrome/fonts/zpix.woff2（848K）
+   经各 origin 的 /assets/fonts/ 路由提供（serve_asset.py 白名单含 'fonts'）。
+   ⚠️ url 必须写**相对**（不带前导 `/`）：相对本 CSS 文件自身的 URL 解析，
+      自动适配各站前缀（/assets/、/dash/assets/、/static/assets/…），无需各站改路径。
+   ⚠️ 各站**不要再写自己的 @font-face**：统一前有 9 处声明、6 种 url 写法、
+      1 处（nightshift）缺 `@` 导致 Zpix 从未生效。改字体只改这一处。
+   ============================================================ */
+
+@font-face {
+  font-family: 'Zpix';
+  src: url("fonts/zpix.woff2") format("woff2");
+  font-display: block;
+}
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-canvas: #0d1018;
+  --bg-section: #131720;
+  --bg-surface: #1c2130;
+  --border-default: #3c455e;
+  --text-muted: #8f96a8;
+  --text-primary: #e4dcc4;
+  --color-brand: #e8853d;
+  --color-danger: #d8645a;
+  --color-special: #8d78c9;
+  --color-info: #54b8bc;
+  --color-success: #68a36b;
+  --shadow-pixel: #080a10;
+  --highlight-pixel: #283047;
+  --scanline: rgba(255, 255, 255, 0.02);
+  /* 数据/图表标准色 (dashboard 系列) */
+  --data-1: #e8853d;
+  --data-2: #54b8bc;
+  --data-3: #8d78c9;
+  --data-4: #68a36b;
+  --data-5: #d8645a;
+  --data-6: #c7a052;
+  --data-7: #5688ad;
+  --data-8: #7A8194;
+  --chart-grid: #242a3a;
+  --chart-label: #8f96a8;
+  --chart-tooltip-bg: #1c2130;
+  --chart-tooltip-border: #3c455e;
+  --chart-income: #54b8bc;
+  --chart-expense: #d8645a;
+  --color-income: #54b8bc;
+  --color-expense: #d9752f;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg-canvas: #f1eadb;
+  --bg-section: #e7dfcf;
+  --bg-surface: #fff8e8;
+  --border-default: #b8ad99;
+  --text-muted: #6d6f7d;
+  --text-primary: #202534;
+  --color-brand: #e8853d;
+  --color-danger: #d8645a;
+  --color-special: #8d78c9;
+  --color-info: #54b8bc;
+  --color-success: #68a36b;
+  --shadow-pixel: #aaa08e;
+  --highlight-pixel: #ffffff;
+  --scanline: rgba(0, 0, 0, 0.04);
+  /* 数据/图表标准色 (light) */
+  --data-1: #e8853d;
+  --data-2: #54b8bc;
+  --data-3: #8d78c9;
+  --data-4: #68a36b;
+  --data-5: #d8645a;
+  --data-6: #c7a052;
+  --data-7: #5688ad;
+  --data-8: #7A8194;
+  --chart-grid: #d8cfbd;
+  --chart-label: #6d6f7d;
+  --chart-tooltip-bg: #fff8e8;
+  --chart-tooltip-border: #b8ad99;
+  --chart-income: #54b8bc;
+  --chart-expense: #d8645a;
+  --color-income: #54b8bc;
+  --color-expense: #d9752f;
+}
+
+/* ============================================================
+   字号档位 type scale（2026-09-20 建立）
+   硬规则：font-size 只能取下面 11 档，且一律整数 px。
+     Zpix 是像素字体，半像素字号（8.5 / 11.5 / 12.5 …）必然错格。
+   新元素选最近的档位，不要发明新值，也不要写 em/rem 派生值。
+   字号与主题无关（两主题同值），所以只定义一次在 :root。
+   ============================================================ */
+:root{
+  --fs-10:10px;  /* 最小说明 / 图表轴标签 / 密集徽章 */
+  --fs-11:11px;  /* 小标签 / 辅助信息 / 表格次要列 */
+  --fs-12:12px;  /* 次要正文（全站主力档）*/
+  --fs-13:13px;  /* 正文 / 表格主列 */
+  --fs-14:14px;  /* 强调正文 / 表单标签 / 导航项 */
+  --fs-16:16px;  /* 卡片标题 / 段落正文 / 按钮 */
+  --fs-18:18px;  /* 区块标题 */
+  --fs-20:20px;  /* 页面小标题 */
+  --fs-24:24px;  /* 页面标题 / header 标题 */
+  --fs-30:30px;  /* 大标题 */
+  --fs-48:48px;  /* 统计大字 / 空状态主图 */
+
+  /* ── 图标尺寸：**两档制**（2026-09-21 定案）+ 一个 hero 档 ──
+     判断依据是「**作用层级**」，不是字号、也不是容器的像素高度：
+       大 20px = 全局层级：header 按钮 / 服务导航 / 创建类 CTA（「新建文件夹」）/ 浮动工具栏
+       小 14px = 页面内容层级：工具条按钮 / 文件树操作 / 行内标签 / 卡片内元素
+     未指定 --y8i-size 时默认 20px。
+     反直觉案例：dash 服务导航字号才 12px 仍归 20（它管整页跳转）；
+                book 工具条宿主 40px 仍归 14（它是页面内操作）。 */
+  --y8i-14:14px; /* 小档 —— 页面内容层级。DPR=2 下 k=1.167（块宽 1/2 混排，观感可接受）*/
+  --y8i-20:20px; /* 大档 —— 全局层级；**默认值**。DPR=2 下 k=1.667。
+                    这是像素风装饰而非真像素对齐，块宽混排在实机上看不出（已确认）。*/
+  --y8i-48:48px; /* **hero 档** —— 空状态大插图（配 --fs-48），只此一用。
+                    唯一使用点：bookkeeping「定期」空状态（无定期项目时）。
+                    这是「插图」不是「UI 图标」，空状态之外不要用。*/
+  /* ⚠️ 已退役：--y8i-12（2026-09-21，「12 太小」→ 全改 14）；
+            --y8i-24（同日收成两档制，无位置；默认值同时从 24 改成 20）；
+            --y8i-36（同日删，从未有任何引用）。
+     退役必修：先清完全部引用点再删 token，否则漏网引用会 fallback 到默认值、尺寸静默突变。 */
+}

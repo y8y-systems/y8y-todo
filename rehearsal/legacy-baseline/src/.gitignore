@@ -1,0 +1,45 @@
+# ───────────────────────────────────────────────────────────
+# y8y todolist · monorepo
+# ───────────────────────────────────────────────────────────
+# 这个仓库只跟踪代码和配置
+# 任务数据 /var/lib/todolist/ 在 VPS 整机备份里覆盖,不需要 git
+# ───────────────────────────────────────────────────────────
+
+# ── 任务数据 (绝对不能进 git) ──
+*.md
+!tree/*.md
+!README.md
+!README-LEGACY.md
+
+# ── 旧位置备份目录 (历史命名约定) ──
+_backup_*/
+.backup_*/
+
+# ── Playwright 验证产物 ──
+_verify/
+*.png
+
+# ── Python 运行时 ──
+__pycache__/
+*.pyc
+*.pyo
+
+# ── 编辑器/系统 ──
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── 环境/日志 ──
+.env
+.env.local
+*.log
+logs/
+
+# ── 本地回滚快照（不属版本控制；靠项目外备份）── 2026-09-22 补
+# 注：`_backup_*/` `.backup_*/` 只匹配带下划线的，裸 `backup/` 一直漏网
+backup/
+# y8y 数据目录永不进 git（持久数据在库外 /var/lib/todolist-legacy/data/）
+/data
+data/

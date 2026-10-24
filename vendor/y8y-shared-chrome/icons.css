@@ -1,0 +1,61 @@
+/* ============================================================
+   y8y-chrome / icons.css — 通用 UI 图标（共享壳唯一来源）
+
+   图标资产: icons/ui/<语义>.svg — Pixelarticons (MIT, v2.4.2)。
+   授权与归属见 icons/PIXELARTICONS-LICENSE.txt 与仓库根
+   THIRD_PARTY_LICENSES.md。
+
+   单色 SVG + CSS mask + currentColor:
+     · 一个文件同时服务亮/暗主题 —— 颜色随继承的 color 自动切换
+     · 任意 DPR 清晰（矢量），不再需要 dark/light 双份 PNG
+     · 语义名沿用原 y8y 命名（add/list/calendar/...），HTML 不变
+
+   用法：<span class="y8i y8i-save"></span>
+     尺寸：只用档位变量 —— var(--y8i-14) / var(--y8i-20) / var(--y8i-48)
+           （两档制：大 20 / 小 14 + hero 48；12 与 24 已退役，36 从未启用）
+           （档位定义在共享 tokens.css，与字号档位同源）
+
+   注意：url() 相对本 CSS 文件解析（/assets/icons.css → /assets/icons/ui/），
+   与旧 PNG 方案的路径布局一致。
+   ============================================================ */
+
+.y8i{
+  display:inline-block;
+  /* 默认 = 20px（大档）。档位定义在共享 tokens.css。 */
+  width:var(--y8i-size, var(--y8i-20, 20px));
+  height:var(--y8i-size, var(--y8i-20, 20px));
+  flex:none;
+  vertical-align:middle;
+  /* 图标 = 单色 SVG 作 mask，颜色来自 currentColor（自动跟随主题与容器文字色）*/
+  background-color:currentColor;
+  -webkit-mask-image:var(--icon);
+  mask-image:var(--icon);
+  -webkit-mask-repeat:no-repeat;
+  mask-repeat:no-repeat;
+  -webkit-mask-position:center;
+  mask-position:center;
+  -webkit-mask-size:contain;
+  mask-size:contain;
+}
+
+.y8i-add{--icon:url("icons/ui/add.svg")}
+.y8i-list{--icon:url("icons/ui/list.svg")}
+.y8i-calendar{--icon:url("icons/ui/calendar.svg")}
+.y8i-cart{--icon:url("icons/ui/cart.svg")}
+.y8i-reload{--icon:url("icons/ui/reload.svg")}
+.y8i-settings{--icon:url("icons/ui/settings.svg")}
+.y8i-bookmark{--icon:url("icons/ui/bookmark.svg")}
+.y8i-expand{--icon:url("icons/ui/expand.svg")}
+.y8i-pager{--icon:url("icons/ui/pager.svg")}
+.y8i-check{--icon:url("icons/ui/check.svg")}
+.y8i-trash{--icon:url("icons/ui/trash.svg")}
+.y8i-edit{--icon:url("icons/ui/edit.svg")}
+.y8i-eye{--icon:url("icons/ui/eye.svg")}
+.y8i-copy{--icon:url("icons/ui/copy.svg")}
+.y8i-close{--icon:url("icons/ui/close.svg")}
+.y8i-sun{--icon:url("icons/ui/sun.svg")}
+.y8i-moon{--icon:url("icons/ui/moon.svg")}
+.y8i-recurring{--icon:url("icons/ui/recurring.svg")}
+.y8i-menu{--icon:url("icons/ui/menu.svg")}
+
+/* 未匹配 --icon 的 .y8i 不应渲染任何东西（默认无图标）。 */

@@ -1,0 +1,151 @@
+/* ============================================================
+   y8y-chrome / icons.css — 通用 UI 图标（共享壳唯一来源）
+   2026-09-20 建立。54 个语义，源自 pixelarticons，脚本生成：
+     /var/lib/todolist-legacy/shared/chrome/scripts/gen-ui-icons.py
+   资产：icons/ui/<语义>-{dark,light}.png
+
+   用法：<span class="y8i y8i-save"></span>
+     尺寸：只用档位变量 —— var(--y8i-14) / var(--y8i-20) / var(--y8i-48)
+           （两档制：大 20 / 小 14 + hero 48；12 与 24 已退役，36 从未启用）
+           （档位定义在共享 tokens.css，与字号档位同源）
+       CSS  ：.toolbar .y8i{ --y8i-size:var(--y8i-24); }
+       行内 ：<span class="y8i y8i-save" style="--y8i-size:var(--y8i-14)"></span>
+     ⚠️ 图标尺寸只允许 12 的倍数（画布 24×24、原图像素是 2×2 块）：
+        12(0.5×) / 24(1× 原生) / 36(1.5×) / 48(2×)。16、20 之类永远错格走形，禁止。
+     默认已统一为 24px（原生 1:1 档）；行内/小容器显式覆盖成 var(--y8i-14)。
+     ⚠️ 2026-09-21 定案：**--y8i-12 已废弃（太小），不再使用**；最小档 = 14px。
+
+   [历史] 默认尺寸曾经历 1.25em → 1.36em（2026-09-20 描边加粗时）→ **24px**（2026-09-20 档位定案）。
+      1.36em 的问题：跟随字号 ⇒ 落在 12px 正文上 = 16.31px，非整格、必然错格走形。
+      原记录：默认尺寸从 1.25em 提到 1.36em（2026-09-20）：描边由 1px 加粗为 2px 后画布 22→24px，
+      显示尺寸要按 24/22 = 1.0909 等比放大，本体（图形）视觉大小才与之前一致 —— 只有描边变粗。
+      ⚠️ 描边 2px 是硬约束：pixelarticons 原图本身就是 2×2 PNG 像素块的网格（12×12 像素材放大 2 倍），
+      所以描边只能是 2 的倍数（2px=1 格 ✓ / 4px=2 格）；1px 是半个像素，永远与图形错位。
+
+   两主题两套做法（拍板 2026-09-20）：
+     dark  = V4C1 三色：描边 --border-default + 线段 --bg-surface + 内部填充 --text-primary
+             （纯线条图标无闭合内部 → 线段直接用 --text-primary + 外描边）
+     light = 原版单色线稿，用 --text-primary
+
+   资产是 1 天缓存（非 immutable）—— 换图后 bump 这里和页面的 ?v=N。
+
+   ⚠️ 图标 URL 一律写「根绝对」/assets/icons/ui/...（不要改成文档相对/CSS 相对）：
+      自定义属性里的 url() 基准在 Chromium 里不稳定（实测同一份 CSS，
+      页面在根目录时按样式表目录解析、在子路径时按文档目录解析）→ 相对写法必有一边 404。
+      与 dash 导航图标 (--icon-d:url('/assets/icons/nav/...')) 保持同一写法。
+      前提：每个 app 在自己子域根路径提供 /assets/*（当前全站架构如此）。
+   ============================================================ */
+
+.y8i{
+  display:inline-block;
+  /* 默认 = 24px（原生 1:1 档，全站统一）。尺寸档定义在共享 tokens.css。
+     ⚠️ 档位已收敛为两档（2026-09-21 定案）：**大 20 / 小 14**（+ 插图档 36/48）。
+        判断依据是**作用层级**，不是字号：
+          · 20px = 全局层级：header 按钮 / 服务导航 / 创建类 CTA（如「新建文件夹」）/ 浮动工具栏
+          · 14px = 页面内容层级：工具条按钮 / 文件树操作 / 行内标签 / 卡片内元素
+        未指定时走默认 20px。12 与 24 均已退役（不要再使用）。 */
+  width:var(--y8i-size, var(--y8i-20, 20px));
+  height:var(--y8i-size, var(--y8i-20, 20px));
+  background-repeat:no-repeat;
+  background-position:center;
+  background-size:contain;
+  image-rendering:pixelated;
+  /* 2026-09-20：-0.18em → middle。
+     -0.18em 是为「行内图标与文字**基线**对齐」设的，但它对 10px 字号只有 -1.8px 的位移，
+     在「图标比文字大」的紧凑标签里不够用 —— 实测 todo .project-badge / .shared-badge
+     的文字会偏下 2.1px。middle（元素中点对齐父元素基线上方 x-height/2）在
+     行内混排场景下天然居中：实测文字上/下间距 7.2/3 → 4.5/5.5。
+     全站影响面已验证：只有 todo 那一处会变（且是往好的方向），
+     book 12 处 / shop 3 处 / docs 1 处行内场景全部零变化。
+     注：flex/grid 容器里 vertical-align 本就不生效，那些场景不受影响。 */
+  vertical-align:middle;
+  flex:none;
+}
+/* 元素自身带 .y8i 的「按钮即图标」写法（如 docs 的 <button class="settings-btn y8i">）：
+   容器的固定尺寸（width:34px/height:34px 或 padding 撑出的宽度）特异性高于 .y8i，
+   于是 background-size:contain 会把 PNG 撑到非档位尺寸（34px = 错格）。
+   这里把背景尺寸钉回档位值 —— 按钮尺寸不变，图标保持 24px 居中。 */
+/* ⚠️ 必须 !important：header.css 里 `.header .settings-btn{ background: var(--bg-surface) }`
+   是**简写**，会把 background-size 重置成 auto；且其特异性 (0,2,0) 高于 .y8i (0,1,0)。
+   icons.css 在 header.css 之后加载，但特异性输了，所以只能靠 !important 压过去。 */
+button.y8i, a.y8i, [role="button"].y8i{
+  background-size: var(--y8i-size, var(--y8i-20, 20px)) var(--y8i-size, var(--y8i-20, 20px)) !important;
+}
+
+/* ⚠️ 兜底铁律（2026-09-20 修复）：默认 dark，只有「明确 light」才切 light。
+   旧写法是 html[data-theme="light"] / ["dark"] 两条硬匹配 —— 一旦 data-theme 是任何
+   其他值（空串、'DARK'、未来第三主题 'dusk'、被污染的 localStorage），两条都不命中
+   → background-image 永不设置 → **图标全部消失**（已实测复现：空串/dusk/DARK 全挂）。
+   :not([data-theme="light"]) 让任何异常值都落到 dark 版。
+   注：tokens.css 的颜色 token 有 :root 兜底，所以颜色不受影响 —— 只有图标曾踩这个坑。 */
+html:not([data-theme="light"]) .y8i{ background-image:var(--d); }
+html[data-theme="light"] .y8i{ background-image:var(--l); }
+@media (prefers-color-scheme: light){ html:not([data-theme]) .y8i{ background-image:var(--l); } }
+
+.y8i-add{--d:url("/assets/icons/ui/add-dark.png?v=3");--l:url("/assets/icons/ui/add-light.png?v=3")}
+.y8i-save{--d:url("/assets/icons/ui/save-dark.png?v=3");--l:url("/assets/icons/ui/save-light.png?v=3")}
+.y8i-trash{--d:url("/assets/icons/ui/trash-dark.png?v=3");--l:url("/assets/icons/ui/trash-light.png?v=3")}
+.y8i-edit{--d:url("/assets/icons/ui/edit-dark.png?v=3");--l:url("/assets/icons/ui/edit-light.png?v=3")}
+.y8i-close{--d:url("/assets/icons/ui/close-dark.png?v=3");--l:url("/assets/icons/ui/close-light.png?v=3")}
+.y8i-reload{--d:url("/assets/icons/ui/reload-dark.png?v=3");--l:url("/assets/icons/ui/reload-light.png?v=3")}
+.y8i-download{--d:url("/assets/icons/ui/download-dark.png?v=3");--l:url("/assets/icons/ui/download-light.png?v=3")}
+.y8i-upload{--d:url("/assets/icons/ui/upload-dark.png?v=3");--l:url("/assets/icons/ui/upload-light.png?v=3")}
+.y8i-search{--d:url("/assets/icons/ui/search-dark.png?v=3");--l:url("/assets/icons/ui/search-light.png?v=3")}
+.y8i-filter{--d:url("/assets/icons/ui/filter-dark.png?v=3");--l:url("/assets/icons/ui/filter-light.png?v=3")}
+.y8i-sun{--d:url("/assets/icons/ui/sun-dark.png?v=3");--l:url("/assets/icons/ui/sun-light.png?v=3")}
+.y8i-moon{--d:url("/assets/icons/ui/moon-dark.png?v=3");--l:url("/assets/icons/ui/moon-light.png?v=3")}
+.y8i-list{--d:url("/assets/icons/ui/list-dark.png?v=3");--l:url("/assets/icons/ui/list-light.png?v=3")}
+.y8i-grid{--d:url("/assets/icons/ui/grid-dark.png?v=3");--l:url("/assets/icons/ui/grid-light.png?v=3")}
+.y8i-calendar{--d:url("/assets/icons/ui/calendar-dark.png?v=3");--l:url("/assets/icons/ui/calendar-light.png?v=3")}
+.y8i-expand{--d:url("/assets/icons/ui/expand-dark.png?v=3");--l:url("/assets/icons/ui/expand-light.png?v=3")}
+.y8i-pager{--d:url("/assets/icons/ui/pager-dark.png?v=3");--l:url("/assets/icons/ui/pager-light.png?v=3")}
+.y8i-preview{--d:url("/assets/icons/ui/preview-dark.png?v=3");--l:url("/assets/icons/ui/preview-light.png?v=3")}
+.y8i-user{--d:url("/assets/icons/ui/user-dark.png?v=3");--l:url("/assets/icons/ui/user-light.png?v=3")}
+.y8i-terminal{--d:url("/assets/icons/ui/terminal-dark.png?v=3");--l:url("/assets/icons/ui/terminal-light.png?v=3")}
+.y8i-check{--d:url("/assets/icons/ui/check-dark.png?v=3");--l:url("/assets/icons/ui/check-light.png?v=3")}
+.y8i-reset{--d:url("/assets/icons/ui/reset-dark.png?v=3");--l:url("/assets/icons/ui/reset-light.png?v=3")}
+.y8i-home{--d:url("/assets/icons/ui/home-dark.png?v=3");--l:url("/assets/icons/ui/home-light.png?v=3")}
+.y8i-folder{--d:url("/assets/icons/ui/folder-dark.png?v=3");--l:url("/assets/icons/ui/folder-light.png?v=3")}
+.y8i-file{--d:url("/assets/icons/ui/file-dark.png?v=3");--l:url("/assets/icons/ui/file-light.png?v=3")}
+.y8i-image{--d:url("/assets/icons/ui/image-dark.png?v=3");--l:url("/assets/icons/ui/image-light.png?v=3")}
+.y8i-chart{--d:url("/assets/icons/ui/chart-dark.png?v=3");--l:url("/assets/icons/ui/chart-light.png?v=3")}
+.y8i-menu{--d:url("/assets/icons/ui/menu-dark.png?v=3");--l:url("/assets/icons/ui/menu-light.png?v=3")}
+.y8i-bookmark{--d:url("/assets/icons/ui/bookmark-dark.png?v=3");--l:url("/assets/icons/ui/bookmark-light.png?v=3")}
+.y8i-hash{--d:url("/assets/icons/ui/hash-dark.png?v=3");--l:url("/assets/icons/ui/hash-light.png?v=3")}
+.y8i-archive{--d:url("/assets/icons/ui/archive-dark.png?v=3");--l:url("/assets/icons/ui/archive-light.png?v=3")}
+.y8i-print{--d:url("/assets/icons/ui/print-dark.png?v=3");--l:url("/assets/icons/ui/print-light.png?v=3")}
+.y8i-zap{--d:url("/assets/icons/ui/zap-dark.png?v=3");--l:url("/assets/icons/ui/zap-light.png?v=3")}
+.y8i-external{--d:url("/assets/icons/ui/external-dark.png?v=3");--l:url("/assets/icons/ui/external-light.png?v=3")}
+.y8i-scale{--d:url("/assets/icons/ui/scale-dark.png?v=3");--l:url("/assets/icons/ui/scale-light.png?v=3")}
+.y8i-copy{--d:url("/assets/icons/ui/copy-dark.png?v=3");--l:url("/assets/icons/ui/copy-light.png?v=3")}
+.y8i-drag{--d:url("/assets/icons/ui/drag-dark.png?v=3");--l:url("/assets/icons/ui/drag-light.png?v=3")}
+.y8i-money{--d:url("/assets/icons/ui/money-dark.png?v=3");--l:url("/assets/icons/ui/money-light.png?v=3")}
+.y8i-card{--d:url("/assets/icons/ui/card-dark.png?v=3");--l:url("/assets/icons/ui/card-light.png?v=3")}
+.y8i-receipt{--d:url("/assets/icons/ui/receipt-dark.png?v=3");--l:url("/assets/icons/ui/receipt-light.png?v=3")}
+.y8i-trend{--d:url("/assets/icons/ui/trend-dark.png?v=3");--l:url("/assets/icons/ui/trend-light.png?v=3")}
+.y8i-category{--d:url("/assets/icons/ui/category-dark.png?v=3");--l:url("/assets/icons/ui/category-light.png?v=3")}
+.y8i-post{--d:url("/assets/icons/ui/post-dark.png?v=3");--l:url("/assets/icons/ui/post-light.png?v=3")}
+.y8i-recurring{--d:url("/assets/icons/ui/recurring-dark.png?v=3");--l:url("/assets/icons/ui/recurring-light.png?v=3")}
+.y8i-percent{--d:url("/assets/icons/ui/percent-dark.png?v=3");--l:url("/assets/icons/ui/percent-light.png?v=3")}
+.y8i-hardware{--d:url("/assets/icons/ui/hardware-dark.png?v=3");--l:url("/assets/icons/ui/hardware-light.png?v=3")}
+.y8i-ai{--d:url("/assets/icons/ui/ai-dark.png?v=3");--l:url("/assets/icons/ui/ai-light.png?v=3")}
+.y8i-server{--d:url("/assets/icons/ui/server-dark.png?v=3");--l:url("/assets/icons/ui/server-light.png?v=3")}
+.y8i-shop{--d:url("/assets/icons/ui/shop-dark.png?v=3");--l:url("/assets/icons/ui/shop-light.png?v=3")}
+.y8i-ship{--d:url("/assets/icons/ui/ship-dark.png?v=3");--l:url("/assets/icons/ui/ship-light.png?v=3")}
+.y8i-track{--d:url("/assets/icons/ui/track-dark.png?v=3");--l:url("/assets/icons/ui/track-light.png?v=3")}
+.y8i-video{--d:url("/assets/icons/ui/video-dark.png?v=3");--l:url("/assets/icons/ui/video-light.png?v=3")}
+.y8i-task{--d:url("/assets/icons/ui/task-dark.png?v=3");--l:url("/assets/icons/ui/task-light.png?v=3")}
+.y8i-cart{--d:url("/assets/icons/ui/cart-dark.png?v=3");--l:url("/assets/icons/ui/cart-light.png?v=3")}
+.y8i-report{--d:url("/assets/icons/ui/report-dark.png?v=3");--l:url("/assets/icons/ui/report-light.png?v=3")}
+.y8i-settings{--d:url("/assets/icons/ui/settings-dark.png?v=3");--l:url("/assets/icons/ui/settings-light.png?v=3")}
+.y8i-clock{--d:url("/assets/icons/ui/clock-dark.png?v=3");--l:url("/assets/icons/ui/clock-light.png?v=3")}
+.y8i-shield{--d:url("/assets/icons/ui/shield-dark.png?v=3");--l:url("/assets/icons/ui/shield-light.png?v=3")}
+.y8i-nav-ai{--d:url("/assets/icons/nav/nav-ai-dark.png?v=5");--l:url("/assets/icons/nav/nav-ai-light.png?v=5")}
+.y8i-nav-book{--d:url("/assets/icons/nav/nav-book-dark.png?v=5");--l:url("/assets/icons/nav/nav-book-light.png?v=5")}
+.y8i-nav-cost{--d:url("/assets/icons/nav/nav-cost-dark.png?v=5");--l:url("/assets/icons/nav/nav-cost-light.png?v=5")}
+.y8i-nav-docs{--d:url("/assets/icons/nav/nav-docs-dark.png?v=5");--l:url("/assets/icons/nav/nav-docs-light.png?v=5")}
+.y8i-nav-hindsight{--d:url("/assets/icons/nav/nav-hindsight-dark.png?v=5");--l:url("/assets/icons/nav/nav-hindsight-light.png?v=5")}
+.y8i-nav-review{--d:url("/assets/icons/nav/nav-review-dark.png?v=5");--l:url("/assets/icons/nav/nav-review-light.png?v=5")}
+.y8i-nav-settings{--d:url("/assets/icons/nav/nav-settings-dark.png?v=5");--l:url("/assets/icons/nav/nav-settings-light.png?v=5")}
+.y8i-nav-shop{--d:url("/assets/icons/nav/nav-shop-dark.png?v=5");--l:url("/assets/icons/nav/nav-shop-light.png?v=5")}
+.y8i-nav-todo{--d:url("/assets/icons/nav/nav-todo-dark.png?v=5");--l:url("/assets/icons/nav/nav-todo-light.png?v=5")}

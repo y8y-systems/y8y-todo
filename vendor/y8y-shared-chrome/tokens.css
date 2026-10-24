@@ -1,0 +1,205 @@
+/* ============================================================
+   y8y-chrome / tokens.css — 共享 y8y 设计 token（唯一来源，2026-08-27 建立）
+   主题默认跟随系统（prefers-color-scheme），由 darklight.js 在 <head> pre-paint
+   把 data-theme 写到 <html>。:root 默认暗色（pre-paint 前、或 JS 关时回退）。
+   所有 y8y web 应用 `<link rel="stylesheet" href="chrome/tokens.css">` 即可
+   获得统一的颜色 token，不再各自复制一份。应用专属 token（chart/data 等）
+   可留在各自样式里，但核心 UI token 一律用这份。
+
+   字体: Fusion Pixel 缝合像素字体（2026-10-22 迁入，取代授权不明的 Zpix）。
+   字体与授权文本随本目录分发（fonts/），不依赖任何 CDN。
+   ============================================================ */
+
+/* ============================================================
+   字体 —— Fusion Pixel 缝合像素字体（2026-10-22）
+
+   来源   : https://github.com/TakWolf/fusion-pixel-font
+   版本   : 2026.10.16
+   授权   : SIL Open Font License 1.1（fonts/OFL.txt，与字体同目录分发）
+   改动   : **未做任何修改 / 转换 / 子集化** —— 原样分发，因此保留上游字体名
+            与 OFL 的 Reserved Font Name（"Fusion Pixel Font"）。
+            若日后做子集化，必须改用**不含** Reserved Font Name 的新字体名。
+
+   为什么自带 webfont：旧版 Zpix 的再分发授权无法确认（无 LICENSE/OFL 随附），
+   界面因此长期回落到系统等宽字体；现在换成授权明确、覆盖中/英/日的像素字体。
+
+   只挑用得上的**一款**（避免引入重复资源）：
+     'Fusion Pixel'  12px 比例 · 简体中文字形变体（zh-Hans）—— 全站唯一字体
+
+   为什么就这一款：Fusion Pixel 的比例/等宽两档对**中日韩汉字完全一致**
+   （都是全宽），对**数字也完全一致**（fontTools 实测：两档的 0-9 advance
+   width 同为 600/1000 em，即数字都是等宽数字，列对齐不受影响），差别只在
+   拉丁字母的宽度（比例档的 i/l/. 更窄、W/M 更宽）。而本站的等宽需求只有
+   日历数字与日期输入框 —— 比例档的数字同样成列对齐，所以没必要为此多带
+   一份 650KB 的等宽字体。
+
+   10px 小字档同理不再单列：那一档原本靠 10px 原生字体保证 1:1 清晰，
+   现在统一由 12px 字体在 10/11px 下缩放渲染（略糊，见下文）。
+
+   ⚠️ 像素字体只在「原生尺寸的整数倍」下笔画不糊：
+      12px 字体在 12 / 24 / 48px 清晰；13 / 14 / 16px（以及 10 / 11px
+      小字档）这类非整数倍会略糊 —— 所以正文档一律停在 12px 原生档，
+      需要更大字号时按整数倍上抬（24px = 12px 字体 2 倍，48px = 4 倍）。
+
+   font-display: swap —— 首屏先用系统等宽字兜底，字体到位后换入（配合
+   index.html 里的 <link rel=preload> 提前发起下载）。字体走 immutable
+   长缓存，第二次访问零下载。
+
+   字体文件名带**内容哈希**（<sha256 前 12 位>）—— 换字体 = 换文件名，
+   浏览器缓存不可能再命中旧文件；服务端也只对这种「内容寻址」的文件名
+   发 immutable 长缓存（见 serve_asset.py）。
+   ============================================================ */
+
+@font-face {
+  font-family: 'Fusion Pixel';
+  src: url("fonts/fusion-pixel-12px-proportional-zh_hans.037fb51624ec.otf.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-canvas: #0d1018;
+  --bg-section: #131720;
+  --bg-surface: #1c2130;
+  --border-default: #3c455e;
+  --text-muted: #8f96a8;
+  --text-primary: #e4dcc4;
+  --color-brand: #e8853d;
+  --color-danger: #d8645a;
+  --color-special: #8d78c9;
+  --color-info: #54b8bc;
+  --color-success: #68a36b;
+  --shadow-pixel: #080a10;
+  --highlight-pixel: #283047;
+  --scanline: rgba(255, 255, 255, 0.02);
+  /* 数据/图表标准色 (dashboard 系列) */
+  --data-1: #e8853d;
+  --data-2: #54b8bc;
+  --data-3: #8d78c9;
+  --data-4: #68a36b;
+  --data-5: #d8645a;
+  --data-6: #c7a052;
+  --data-7: #5688ad;
+  --data-8: #7A8194;
+  --chart-grid: #242a3a;
+  --chart-label: #8f96a8;
+  --chart-tooltip-bg: #1c2130;
+  --chart-tooltip-border: #3c455e;
+  --chart-income: #54b8bc;
+  --chart-expense: #d8645a;
+  --color-income: #54b8bc;
+  --color-expense: #d9752f;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg-canvas: #f1eadb;
+  --bg-section: #e7dfcf;
+  --bg-surface: #fff8e8;
+  --border-default: #b8ad99;
+  --text-muted: #6d6f7d;
+  --text-primary: #202534;
+  --color-brand: #e8853d;
+  --color-danger: #d8645a;
+  --color-special: #8d78c9;
+  --color-info: #54b8bc;
+  --color-success: #68a36b;
+  --shadow-pixel: #aaa08e;
+  --highlight-pixel: #ffffff;
+  --scanline: rgba(0, 0, 0, 0.04);
+  /* 数据/图表标准色 (light) */
+  --data-1: #e8853d;
+  --data-2: #54b8bc;
+  --data-3: #8d78c9;
+  --data-4: #68a36b;
+  --data-5: #d8645a;
+  --data-6: #c7a052;
+  --data-7: #5688ad;
+  --data-8: #7A8194;
+  --chart-grid: #d8cfbd;
+  --chart-label: #6d6f7d;
+  --chart-tooltip-bg: #fff8e8;
+  --chart-tooltip-border: #b8ad99;
+  --chart-income: #54b8bc;
+  --chart-expense: #d8645a;
+  --color-income: #54b8bc;
+  --color-expense: #d9752f;
+}
+
+/* ============================================================
+   字号档位 type scale（2026-09-20 建立，2026-10-22 随 Fusion Pixel 微调注释）
+   硬规则：font-size 只能取下面 11 档，且一律整数 px。
+     像素字体在半像素字号（8.5 / 11.5 / 12.5 …）必然错格。
+   新元素选最近的档位，不要发明新值，也不要写 em/rem 派生值。
+   字号与主题无关（两主题同值），所以只定义一次在 :root。
+
+   字体档位怎么配（2026-10-22）：
+     · 全站只有一个字体族（--font-ui = Fusion Pixel 12px 比例 zh-Hans）
+     · 字号档位只管大小，不管字体：12px 档 1:1 最清晰；13/14/16px 这类
+       非整数倍会略糊，10/11px 小字档由 12px 字体缩放而来，也会略糊。
+   档位里的非整数倍笔画会略糊，这是像素字体的固有代价；
+   **不要为了「看起来更清晰」随手改档位值** —— 改字号会动布局，比糊更要命。
+   ============================================================ */
+:root{
+  /* ── 字体族（全站唯一来源）─────────────────────────────────────────
+     'Fusion Pixel' = 12px 比例 · 简体中文（zh-Hans）字形变体，全站唯一一款。
+     后面的系统等宽栈是**兜底**：Fusion Pixel 没有的字符（如 ✓ ✗ 表情）
+     会落到系统字体，界面其余文字不受影响。
+     ⚠️ 不要再引入 'Zpix' —— 它没有可再分发的授权，已于 2026-10-22 移除。 */
+  --font-ui: 'Fusion Pixel', ui-monospace, 'SFMono-Regular', Consolas, monospace;
+
+  --fs-10:10px;  /* 最小说明 / 图表轴标签 / 密集徽章（12px 字体缩放，略糊）*/
+  --fs-11:11px;  /* 小标签 / 辅助信息 / 表格次要列 */
+  --fs-12:12px;  /* 次要正文（全站主力档）*/
+  --fs-13:13px;  /* 正文 / 表格主列 */
+  --fs-14:14px;  /* 强调正文 / 表单标签 / 导航项 */
+  --fs-16:16px;  /* 卡片标题 / 段落正文 / 按钮 */
+  --fs-18:18px;  /* 区块标题 */
+  --fs-20:20px;  /* 页面小标题 */
+  --fs-24:24px;  /* 页面标题 / header 标题 */
+  --fs-30:30px;  /* 大标题 */
+  --fs-48:48px;  /* 统计大字 / 空状态主图 */
+
+  /* ── 图标尺寸：**两档制**（2026-09-21 定案）+ 一个 hero 档 ──
+     判断依据是「**作用层级**」，不是字号、也不是容器的像素高度：
+       大 20px = 全局层级：header 按钮 / 服务导航 / 创建类 CTA（「新建文件夹」）/ 浮动工具栏
+       小 14px = 页面内容层级：工具条按钮 / 文件树操作 / 行内标签 / 卡片内元素
+     未指定 --y8i-size 时默认 20px。
+     反直觉案例：dash 服务导航字号才 12px 仍归 20（它管整页跳转）；
+                book 工具条宿主 40px 仍归 14（它是页面内操作）。 */
+  --y8i-14:14px; /* 小档 —— 页面内容层级。DPR=2 下 k=1.167（块宽 1/2 混排，观感可接受）*/
+  --y8i-20:20px; /* 大档 —— 全局层级；**默认值**。DPR=2 下 k=1.667。
+                    这是像素风装饰而非真像素对齐，块宽混排在实机上看不出（已确认）。*/
+  --y8i-48:48px; /* **hero 档** —— 空状态大插图（配 --fs-48），只此一用。
+                    唯一使用点：bookkeeping「定期」空状态（无定期项目时）。
+                    这是「插图」不是「UI 图标」，空状态之外不要用。*/
+  /* ⚠️ 已退役：--y8i-12（2026-09-21，「12 太小」→ 全改 14）；
+            --y8i-24（同日收成两档制，无位置；默认值同时从 24 改成 20）；
+            --y8i-36（同日删，从未有任何引用）。
+     退役必修：先清完全部引用点再删 token，否则漏网引用会 fallback 到默认值、尺寸静默突变。 */
+}
+
+/* ============================================================
+   字重策略（2026-10-22 随 Fusion Pixel 定案；2026-10-22 按评审意见改为 B 方案）
+
+   禁止浏览器**合成粗体**：Fusion Pixel 只有 400 一个字重，上游也没有
+   粗体资源。合成粗体是浏览器把 400 的字形横向抹粗半像素 —— 12px 的
+   像素网格当场糊掉（对比图见 docs/font-migration/）。
+
+   font-synthesis 可继承，挂在 :root 上全站生效（Chrome 97+ /
+   Safari 9+ / Firefox 34+ 全部支持，Baseline 2022-01）。
+   本站没有用 font-style:italic，所以一并关掉斜体合成没有副作用。
+
+   B 方案（当前采用）：**只关合成，不另加粗**。`font-weight: bold` 的
+   声明原样保留（意图不丢，将来若引入真正的粗体字面即可直接生效），
+   但渲染出来是干净的 400 —— 层级改由既有的颜色 / 边框 / 字号承担。
+
+   曾经评估过 C 方案（1px 硬偏移双描边，pixel-art 式加粗）并做过实现，
+   因为整体观感偏重而按评审意见回退；对比图见 docs/font-migration/。
+   ============================================================ */
+:root {
+  font-synthesis: none;
+}

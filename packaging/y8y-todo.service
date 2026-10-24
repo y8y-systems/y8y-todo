@@ -1,0 +1,44 @@
+# y8y-todo systemd 单元示例 (复制到 /etc/systemd/system/y8y-todo.service)
+#
+# 原则:
+#   - 以专用非 root 用户运行 (绝不用 root)
+#   - 秘密与配置走 EnvironmentFile, 不写进单元文件
+#   - 仅绑定回环, 前面放反向代理 (身份认证由代理负责)
+#   - systemd 249 (Ubuntu 22.04) 兼容 — 无 250+ 专有指令
+#
+# 本单元依赖的路径 (README「Deploying as a service」的安装流程会全部建好):
+#   /opt/y8y-todo/src/serve.py   代码 — root 拥有、全局可读, 服务只读
+#   /etc/y8y-todo/y8y-todo.env   配置 — root:root 600, systemd 以 root 读取
+#   /var/lib/y8y-todo            数据 — y8y:y8y 拥有, 服务唯一可写路径
+#
+# ── Python 运行环境 (二选一, 默认 = 系统 Python) ──
+#   核心只依赖标准库, 要求 Python >= 3.10:
+#   A. 系统 Python >= 3.10 (Ubuntu 22.04 的 3.10 即可): 保持下面的默认行。
+#   B. 独立 Python 3.12 (不动系统 Python, 不影响其他服务):
+#        sudo -u y8y bash -lc 'uv python install 3.12'
+#        sudo -u y8y bash -lc 'uv python find 3.12'   # 记下绝对路径
+#      然后把 ExecStart 换成 (示例路径按实际替换):
+#        ExecStart=/var/lib/y8y-todo/.local/share/uv/python/cpython-3.12.*/bin/python3 /opt/y8y-todo/src/serve.py
+#      注意: 不要写裸 'python3' — systemd 的 PATH 与交互 shell 不同。
+[Unit]
+Description=y8y Todo
+After=network.target
+
+[Service]
+Type=simple
+User=y8y
+Group=y8y
+WorkingDirectory=/opt/y8y-todo/src
+EnvironmentFile=/etc/y8y-todo/y8y-todo.env
+ExecStart=/usr/bin/python3 /opt/y8y-todo/src/serve.py
+Restart=always
+RestartSec=5
+# 基础加固 (不需要的权限一律不给)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/y8y-todo
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,165 @@
+name: pytest
+
+on:
+  pull_request:
+    branches:
+      - main
+      - 'feature/**'
+  push:
+    branches:
+      - main
+      - 'feature/**'
+
+# 限制默认权限 — workflow 不需要任何写权限
+permissions:
+  contents: read
+
+# 让同类 workflow 不并发跑(避免多个 PR 抢资源)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # 显式 bash(避免 windows runner default shell 差异)
+    # 2026-10-17 明确要求
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 目标平台矩阵: 3.10 = Ubuntu 22.04 系统 Python (真实生产候选),
+        # 3.11/3.12 = P3 以来 CI 验证版本 (独立 runtime 候选)。
+        # 全部实测通过 — 核心仅用标准库, 无版本专属语法。
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-py${{ matrix.python-version }}-${{ hashFiles('tests/**/*.py', 'pytest.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-py${{ matrix.python-version }}-
+
+      - name: Install pytest
+        # 项目本身零运行时依赖 (仅标准库); 只装 pytest
+        # fonttools 只被**测试**用到 (tests/test_font_coverage.py 读字体的
+        # cmap 表做真正的字符覆盖检查) —— 应用运行时仍然零依赖。
+        # pip 缓存命中 → 几秒
+        run: |
+          python -m pip install --upgrade pip
+          # fonttools[woff] —— [woff] 这个 extra 会把 Brotli 解码器一起装上
+          # (WOFF2 是 Brotli 容器，少了它 fontTools 读不了字体的 cmap 表)。
+          python -m pip install 'pytest>=7.0,<9.0' 'fonttools[woff]>=4.40'
+
+      - name: Verify CI gates are consistent
+        # 门自己会报警: 内部测试 job 增删改名却没同步 gate 的 needs 时,
+        # 这里红 → gate / pytest 红 → PR 合不进去。
+        # (替代「靠 Agent 记得同步」—— 见 AGENTS.md §4.1)
+        run: bash scripts/check-ci-gates.sh
+
+      - name: Run pytest
+        # --basetemp 是 PR description 提到的:某些 CI sandbox file shim 对默认 /tmp 处理有 bug
+        # 同时让多个 matrix 任务用各自 .pytest-tmp 不冲突
+        # 显式 pipefail + PIPESTATUS 捕获 pytest 退出码
+        # (避免 `tee` 隐藏失败 — 2026-10-17 明确要求)
+        # Y8Y_REQUIRE_FONT_TOOLS=1 → 字体覆盖测试不许「静默跳过」，
+        # 没装 fonttools 就必须红。
+        env:
+          Y8Y_REQUIRE_FONT_TOOLS: '1'
+        run: |
+          set -euo pipefail
+          python -m pytest --basetemp=.pytest-tmp -v --tb=short 2>&1 | tee pytest-output.txt
+          TEST_RC=${PIPESTATUS[0]}
+          echo "::notice::pytest exit code: $TEST_RC"
+          exit $TEST_RC
+
+      - name: Upload pytest output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-${{ matrix.python-version }}
+          path: pytest-output.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ─────────────────────────────────────────────────────────────
+  # 公开树隐私门 —— 公开仓库的**二次**检查
+  #
+  # 查什么: 工作树里有没有开发者家目录路径、私人邮箱、私钥材料、指向本
+  #   org 其它私有仓库的引用, 以及 legacy-baseline 的 MANIFEST 有没有漂移。
+  #
+  # ⚠️ 输出是**脱敏**的: 这道门跑在公开的 CI 日志里, 命中的原文(私人
+  #   邮箱、私钥片段)一旦被打印, 等于把要找的东西又公开一次。所以只报
+  #   「问题类型 + 文件位置 + 行号」, 不报原文。见 scripts/check-public-tree.sh。
+  #
+  # 机器级(push 前)的隐私检查**不在这里** —— 那属于全局 Agent 基础设施,
+  #   由私有运维系统统一管理, 不塞进 Todo 仓库。
+  #
+  # 它是 gate / pytest 的上游 → 这道门红了, PR 就合不进去。
+  #   维护: 增删/改名内部 job 时, 同步改 gate-pytest 的 needs(见 AGENTS.md §4.1)。
+  # ─────────────────────────────────────────────────────────────
+  public-tree:
+    name: public tree privacy gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Public-tree privacy scan
+        # 实现是 scripts/check-public-tree.py（纯标准库）；
+        # .sh 只是入口 wrapper —— 文档与 workflow 都指向它。
+        run: bash scripts/check-public-tree.sh
+
+  # ─────────────────────────────────────────────────────────────
+  # CI Gate — 稳定名称的汇总检查
+  #
+  #   Ruleset 的 Required Status Checks 只配这 4 个名字:
+  #     gate / pytest   gate / ubuntu   gate / e2e   gate / upgrade
+  #   内部测试 job 怎么增删改名, Ruleset 都不用动。
+  #
+  # ⚠️ 机制 (别简化):
+  #   · needs  —— 本 workflow 的**全部**测试 job
+  #   · if: always() —— 上游失败时本 job 仍然跑。
+  #     没有它: 上游失败 → 本 job 被 skip → GitHub 把 skipped 当成
+  #     「已满足 Required Check」→ 门形同虚设。
+  #   · 判定 —— 显式检查每个 needs.<job>.result, 任何非 success
+  #     (failure / cancelled / skipped) 都让本 job **失败**。
+  #     必须是 failure 而不是 skipped。
+  #
+  # 维护: 新增/删除/重命名内部测试 job 时, 同步改下面的 needs
+  # (见 AGENTS.md §4.1)。判定逻辑在 scripts/ci-gate-check.sh, 四处共用。
+  # ─────────────────────────────────────────────────────────────
+  gate-pytest:
+    name: gate / pytest
+    runs-on: ubuntu-latest
+    needs: [test, public-tree]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - name: Aggregate upstream results
+        env:
+          RESULT_pytest: ${{ needs.test.result }}
+          RESULT_publictree: ${{ needs.public-tree.result }}
+        run: |
+          set -euo pipefail
+          upstream=""
+          upstream="$upstream pytest=${RESULT_pytest}"
+          upstream="$upstream public-tree=${RESULT_publictree}"
+          echo "upstream: $upstream"
+          CI_GATE_UPSTREAM="$upstream" bash scripts/ci-gate-check.sh

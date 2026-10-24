@@ -1,0 +1,4171 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>y8yTODO</title>
+<!-- favicon: SVG 为主 (矢量, 任何尺寸/高 DPI 都锐利), PNG 兜底。
+     ⚠️ PNG 别删 —— Safari 26 之前完全不渲染 SVG favicon (Can I Use /
+     WebKit WWDC25), 那部分用户只认这张 PNG, 删了他们标签页就是空白。
+     两条都带 ?v= 内容哈希: 换 logo 后浏览器缓存留不住旧图。 -->
+<link rel="icon" type="image/png" sizes="48x48" href="assets/brand/favicon-48.png?v=fffb04f6">
+<link rel="icon" type="image/svg+xml" sizes="any" href="assets/brand/y8y-logo.svg?v=0e6d917b">
+<script>
+/* darklight pre-paint — y8y 共享主题引擎引导
+   为什么必须 inline: 要在任何 CSS 生效前定下 data-theme, 否则首屏闪白。
+   此处只做「读模式 → 上色」; 三态决策/系统监听/按钮高亮全在 /assets/darklight.js */
+(function () {
+  var K = 'y8y-theme-mode', LEGACY = ['theme', 'y8yshop-theme'], m = null, i = 0;
+  try {
+    for (; i < LEGACY.length; i++) if (localStorage.getItem(LEGACY[i]) !== null) localStorage.removeItem(LEGACY[i]);
+    m = localStorage.getItem(K);
+  } catch (e) {}
+  if (m !== 'light' && m !== 'dark') m = 'auto';
+  var r = (m === 'auto')
+    ? ((window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light')
+    : m;
+  document.documentElement.setAttribute('data-y8y-theme-mode', m);
+  document.documentElement.setAttribute('data-theme', r);
+})();
+</script>
+<!-- 共享 CSS 的 ?v= 是**文件内容哈希的前 8 位**（不是手写版本号）：
+     改 CSS 不用记得手动改版本号, URL 一定跟着内容变, 浏览器缓存不可能
+     再拿到旧 CSS。tests/test_font_assets.py 会核对这一点, 对不上就红。
+     字体本身同理 —— 文件名带内容哈希（见下方 preload 与 tokens.css）。
+     品牌图（favicon / header logo）也走同一条规矩: ?v= = 文件内容哈希
+     的前 8 位 —— 换 logo 时 URL 一定跟着变, 浏览器缓存留不住旧 logo。
+     品牌图本身是矢量 SVG, 浏览器直接按矢量渲染 (DPR=2/3 的屏上比
+     预渲染 PNG 更锐利); 只有 favicon 另存了一份 PNG 兜底。
+     tests/test_brand_assets.py 会核对这一点。 -->
+<link rel="stylesheet" href="assets/tokens.css?v=0a24ffa6">
+<link rel="stylesheet" href="assets/header.css?v=568966f0">
+<link rel="stylesheet" href="assets/icons.css?v=72ee0051">
+<!-- 像素字体预载: 与 CSS 里的 @font-face 同源同文件, 提前发起下载,
+     让首屏直接拿到像素字, 少一次 fallback→像素的换装跳动。
+     字体走 immutable 长缓存 (见 serve.py), 第二次访问不再下载。
+     全站只有这一款字体, 所以预载它一份就够。 -->
+<link rel="preload" href="assets/fonts/fusion-pixel-12px-proportional-zh_hans.037fb51624ec.otf.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+/* 字体: Fusion Pixel 缝合像素字体（OFL-1.1，2026-10-22 迁入，取代授权不明的 Zpix）。
+   @font-face 与 --font-ui 定义在共享 tokens.css (assets/tokens.css) ——
+   全站只有「中文 12px 比例」这一款字体, 字体只改那一处。
+   字重策略（关掉浏览器合成粗体）同样在 tokens.css 里。 */
+
+/* ── Design Tokens — y8y v2.0.0 ── */
+/* light is default (page loads in light first; initTheme may flip before paint) */
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* 1. neutral paper ramp */
+  --bg-canvas: #f1eadb;
+  --bg-section: #e7dfcf;
+  --bg-surface: #fff8e8;
+  --border-default: #b8ad99;
+  --text-muted: #6d6f7d;
+  --text-primary: #202534;
+
+  /* 2. semantic (brand / danger / special / info / success)
+     y8y v2.1.0 §2.2: accent 不再分 day/night，亮色原样复用 night 值。
+     2026-09-22 先统一了 brand；2026-09-23 余下 4 个 day 变体（#A83F3C/#6751A7/#246E75/#336B3D）删除，完全对齐规范。 */
+  --color-brand: #e8853d;
+  --color-danger: #d8645a;
+  --color-special: #8d78c9;
+  --color-info: #54b8bc;
+  --color-success: #68a36b;
+  /* 自选颜色 (实验: 2026-08-11 想看暗色 night 值用在亮色模式的效果) */
+  --c-orange: #e8853d;
+  --c-cyan: #54b8bc;
+  --c-purple: #8d78c9;
+  --c-green: #68a36b;
+  --c-red: #d8645a;
+  --c-yellow: #c7a052;
+  --c-blue: #5688ad;
+  --c-pink: #e58ab0;
+
+  /* 3. pixel depth */
+  --shadow-pixel: #aaa08e;
+  --highlight-pixel: #ffffff;
+
+  /* 4. bookkeeping extensions (同 y8y v2.1.0：亮色复用 night 值) */
+  --color-income: #54b8bc;
+  --color-expense: #d9752f;
+
+  /* 5. geometric tokens (from y8y §7) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --shadow-card: 6px;
+  --shadow-control: 3px;
+  --border-card: 3px;
+  --border-control: 2px;
+
+  --scanline: rgba(0,0,0,0.032);  /* 2026-08-12: 0.04 → 0.032 (基础 100% 再降约 20%) */
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-canvas: #0d1018;
+  --bg-section: #131720;
+  --bg-surface: #1c2130;
+  --border-default: #3c455e;
+  --text-muted: #8f96a8;
+  --text-primary: #e4dcc4;
+
+  --color-brand: #e8853d;
+  --color-danger: #d8645a;
+  --color-special: #8d78c9;
+  --color-info: #54b8bc;
+  --color-success: #68a36b;
+  /* 自选颜色 (dark, data-8 night 值 + pink 用户扩展) */
+  --c-orange: #e8853d;
+  --c-cyan: #54b8bc;
+  --c-purple: #8d78c9;
+  --c-green: #68a36b;
+  --c-red: #d8645a;
+  --c-yellow: #c7a052;
+  --c-blue: #5688ad;
+  --c-pink: #e58ab0;
+
+  --shadow-pixel: #080a10;
+  --highlight-pixel: #283047;
+
+  --color-income: #54b8bc;
+  --color-expense: #d9752f;
+
+  --scanline: rgba(255,255,255,0.02);
+}
+
+/* ── legacy alias mapping (clean migration: old var names → new ones) ── */
+:root,
+[data-theme="light"],
+[data-theme="dark"] {
+  --bg: var(--bg-canvas);
+  --surface: var(--bg-surface);
+  --surface2: var(--bg-section);
+  --muted-bg: var(--bg-section);
+  --border: var(--border-default);
+  --text: var(--text-primary);
+  --text2: var(--text-primary);
+  --inv-text: var(--bg-surface);
+  --accent: var(--color-brand);
+  --accent2: var(--color-brand);
+  --green: var(--color-success);
+  --orange: var(--color-brand);
+  --red: var(--color-danger);
+  --teal: var(--color-info);
+  --dim-text: var(--text-muted);
+  --dim-border: var(--border-default);
+  --card-border: 3px;
+  --inner-border: 2px;
+  --shadow-offset: 6px;
+}
+
+/* ── Reset ── */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+/* 注意: 不要用 height:100% 锁死 body (会让 sticky 子元素的包含块=视口高度,
+   内容溢出时 sticky 行程被截断, filter-bar 吸顶失效, 2026-08-11 实测踩坑) */
+body {
+  font-family: var(--font-ui);
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  padding: 0 0 80px 0;
+  min-height: 100vh;
+  -webkit-tap-highlight-color: transparent;
+  image-rendering: pixelated;
+  position: relative;
+  transition: background 0.15s, color 0.15s;
+}
+
+/* CRT scanline overlay — y8y §7.5 */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    0deg,
+    var(--scanline) 0px,
+    var(--scanline) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+}
+
+/* brand integrity: any parent forcing uppercase cannot re-case the y8y mark */
+.logo-accent { text-transform: none; }
+
+/* ── Header ── (2026-09-11: 几何/品牌拆分/无下划线全部由共享 assets/header.css governs;
+   视图 tab + 新建钮进 .header-right 右槽, 齿轮=独立设置钮 #settingsBtn; 下方仅保留 todo 专属 .count 徽标) ── */
+/* 品牌 logo 强制无下划线 (共享 header.css 之外的防御: 即便该 <link> 在 CF Access 路径未生效,
+   也保证 logo 在任何状态都不出现浏览器默认 <a> 下划线) */
+.brand-img, .brand-img:hover, .brand-img:visited, .brand-img:active,
+.brand-img * { text-decoration: none; }
+/* 只给读屏/文档结构用, 视觉上完全不占位 (header 的文字标题已去掉,
+   页面标题仍要留在文档结构里) */
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
+  white-space: nowrap;
+}
+.header .count {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  color: var(--text-muted);
+  display: inline-block;
+}
+
+/* ── Theme Toggle ── */
+.theme-toggle {
+  width: 34px; height: 34px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 2px solid var(--border-default);
+  cursor: pointer;
+  font-size: var(--fs-14);
+  font-family: var(--font-ui);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+}
+.theme-toggle:hover { background: var(--bg-section); }
+.theme-toggle:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--shadow-pixel);
+}
+.theme-toggle:focus-visible {
+  outline: 3px solid var(--color-brand);
+  outline-offset: 3px;
+}
+
+/* ── Project Scope Switcher ── */
+/* 项目+时间 filter 并排行 (2026-08-11; 2026-09-11 起不再 sticky, 随内容滚走) */
+.filter-bar {
+  position: relative; z-index: 99;   /* 2026-09-11: 不再 sticky(随内容滚走); relative 仍是定位锚, 项目/时间下拉菜单相对它定位不溢出 */
+  display: flex; gap: 8px;
+  background: var(--bg-section);
+  padding: 8px 16px;
+  border-bottom: 3px solid var(--border-default);
+  box-shadow: inset 2px 2px 0 var(--highlight-pixel);
+}
+.filter-cell {
+  flex: 1;
+  min-width: 0;
+  /* 2026-08-12: 移除 position:relative — 菜单改相对 filter-bar 定位, 防窄 cell 时溢出 */
+}
+.filter-cell .project-trigger {
+  width: 100%;
+  max-width: none;
+  justify-content: space-between;
+}
+.project-switcher { position: relative; }
+.time-switcher { position: relative; }
+.project-trigger {
+  height: 34px;
+  max-width: 190px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 2px solid var(--border-default);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+  cursor: pointer;
+  font-size: var(--fs-11);
+  font-family: var(--font-ui);
+}
+.project-trigger:hover { background: var(--bg-section); }
+.project-trigger:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--shadow-pixel);
+}
+.project-trigger:focus-visible,
+.project-menu-item:focus-visible {
+  outline: 3px solid var(--color-brand);
+  outline-offset: 3px;
+}
+.project-trigger-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-caret { color: var(--color-info); flex-shrink: 0; }
+.project-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 16px;                        /* 相对 filter-bar 左对齐展开, 窄 cell 也不溢出 (2026-08-12) */
+  right: auto;
+  width: min(300px, calc(100vw - 32px));
+  max-height: min(420px, calc(100vh - 90px));
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--bg-surface);
+  border: 3px solid var(--border-default);
+  box-shadow: 6px 6px 0 var(--shadow-pixel);
+  z-index: 250;
+}
+.project-menu.open { display: block; }
+.project-menu-item {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 2px solid transparent;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: var(--fs-11);
+  font-family: var(--font-ui);
+  text-align: left;
+}
+.project-menu-item:hover { background: var(--bg-section); }
+.project-menu-item[aria-current="true"] {
+  background: var(--bg-section);
+  border-color: var(--color-info);
+  color: var(--color-info);
+}
+.project-menu-item.create {
+  color: var(--color-brand);
+  border-color: var(--color-brand);
+  margin-top: 6px;
+}
+.project-menu-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-menu-count { color: var(--text-muted); flex-shrink: 0; }
+.project-menu-divider {
+  border: 0;
+  border-top: 2px solid var(--border-default);
+  margin: 6px 4px;
+}
+
+/* ── View Tabs (list / calendar) ── */
+.view-tabs {
+  display: inline-flex;
+  gap: 4px;
+  margin-right: 4px;
+}
+.view-tab {width: 34px; height: 34px; font-family: var(--font-ui); line-height: 1; display: flex; align-items: center; justify-content: center;}
+.view-tab:active {transform: translate(2px, 2px);}
+.view-tab:focus-visible {outline: 3px solid var(--color-brand); outline-offset: 3px;}
+.view-pane[hidden] { display: none !important; }
+
+/* ── Owner toggle group (我 / 共享) ── */
+.owner-toggle-group {display: inline-flex; gap: 4px; margin-right: 4px;}
+.owner-toggle {height: 34px; font-family: var(--font-ui); line-height: 1;}
+.owner-toggle:active {transform: translate(2px, 2px);}
+.owner-toggle:focus-visible {outline: 3px solid var(--color-brand); outline-offset: 3px;}
+/* ── Settings modal ── */
+.modal.settings-modal {
+  position: fixed;
+  top: 50%; left: 50%;
+  bottom: auto;
+  width: min(420px, calc(100vw - 32px));
+  height: auto;
+  max-height: 85vh;
+  max-height: 85dvh;
+  overflow-y: auto;
+  border: 3px solid var(--border-default);
+  box-shadow: 6px 6px 0 var(--shadow-pixel);
+  transform: translate(-50%, -50%) scale(0.92);
+  opacity: 0;
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+.modal-overlay.open .modal.settings-modal {
+  transform: translate(-50%, -50%) scale(1);
+  opacity: 1;
+}
+/* 2026-09-22: 已收归共享 .y8y-settings-* （见 shared/chrome/ui.css） */
+/* 2026-09-22: 已收归共享 .y8y-settings-* （见 shared/chrome/ui.css） */
+.settings-hint {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+/* ── 持久项目 (2026-08-11) ── */
+.persistent-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.persistent-row input {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--bg-canvas);
+  border: 2px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: var(--fs-12);
+  font-family: var(--font-ui);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+}
+/* 添加/移除按钮：自适应文字大小，不撑满 (2026-08-14) */
+.persistent-row .btn,
+.persistent-project-item .btn {flex: 0 0 auto;}
+.persistent-project-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.persistent-project-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
+}
+.persistent-project-name {
+  font-size: var(--fs-12);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.persistent-project-remove {
+  flex-shrink: 0;
+}
+.shared-badge {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  padding: 2px 6px;
+  border: 1px solid var(--color-special);
+  color: var(--color-special);
+}
+
+/* ── Calendar ── */
+.calendar-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px 6px;
+}
+/* 2026-08-12: 月份导航并入 filter-bar 右侧, 与项目/时间筛选并排 */
+.filter-cell-calnav {
+  flex: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.filter-cell-calnav .calendar-title {
+  flex: 1;
+  text-align: center;
+  font-size: var(--fs-13);
+  font-family: var(--font-ui);
+  color: var(--text-primary);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  min-width: 0;
+  white-space: nowrap;
+}
+.filter-cell-calnav .calendar-nav {
+  width: auto;
+  min-width: 30px; height: 30px;
+  padding: 0 6px;
+  font-size: var(--fs-12);
+}
+.filter-cell-calnav .calendar-today {
+  width: auto;
+  min-width: 30px; height: 30px;
+  padding: 0 8px;
+  font-size: var(--fs-11);
+  font-family: var(--font-ui);
+  background: var(--color-brand);
+  color: var(--bg-surface);
+  border-color: var(--color-brand);
+}
+.filter-cell-calnav .calendar-today:hover { background: var(--color-special); border-color: var(--color-special); }
+.calendar-title {
+  flex: 1;
+  text-align: center;
+  font-size: var(--fs-14);
+  font-family: var(--font-ui);
+  color: var(--text-primary);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.calendar-nav, .calendar-today {
+  width: auto;
+  min-width: 34px; height: 34px;
+  padding: 0 8px;
+  font-size: var(--fs-13);
+}
+.calendar-today {
+  background: var(--color-brand);
+  color: var(--bg-surface);
+  border-color: var(--color-brand);
+}
+.calendar-today:hover { background: var(--color-special); border-color: var(--color-special); }
+
+.calendar-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  padding: 0 12px 6px;
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  text-align: center;
+}
+.calendar-weekdays > div { padding: 4px 0; }
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  grid-auto-rows: 130px;          /* 固定行高,关键 (2026-08-12: 110→130, 月份导航并入 filter-bar 后省出一行, 每格显示 4 个任务) */
+  gap: 4px;
+  padding: 0 12px 16px;
+}
+.cal-cell {
+  background: var(--bg-surface);
+  border: 2px solid var(--border-default);
+  height: 130px;                  /* 显式固定 (2026-08-12: 110→130 配合每格 4 任务) */
+  min-height: 0;
+  padding: 6px 4px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: var(--fs-11);
+  font-family: var(--font-ui);
+  position: relative;
+  box-shadow: 2px 2px 0 var(--shadow-pixel);
+  overflow: hidden;               /* 内容超出截断,关键 */
+  cursor: pointer;
+}
+.cal-cell:hover { background: var(--bg-section); }
+.cal-cell.cal-out { opacity: 0.4; }
+.cal-cell.cal-today { border-color: var(--color-brand); }
+.cal-cell.cal-today .cal-day-num {
+  color: var(--color-brand);
+  font-weight: bold;
+}
+.cal-day-num {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+  display: flex;              /* 2026-08-12: 日期 + 祝日并排 */
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+.cal-day-num .cal-holiday {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  color: var(--color-red);    /* 日本惯例祝日红色 */
+  white-space: nowrap;
+  overflow: hidden;           /* 2026-08-12: 硬截断, 不要省略号 */
+  flex: 0 1 auto;
+  min-width: 0;
+  letter-spacing: 0;
+}
+/* 祝日格子的淡粉背景 (2026-08-12: 叠加半透明粉, 不影响格子内任务条) */
+.cal-cell.cal-holiday-cell {
+  background-image: linear-gradient(rgba(229, 138, 176, 0.16), rgba(229, 138, 176, 0.16));
+}
+html[data-theme='dark'] .cal-cell.cal-holiday-cell {
+  background-image: linear-gradient(rgba(229, 138, 176, 0.14), rgba(229, 138, 176, 0.14));
+}
+/* 周六格子的淡蓝背景 (2026-08-12: 与祝日/周日的粉层对称) */
+.cal-cell.cal-saturday-cell {
+  background-image: linear-gradient(rgba(86, 136, 173, 0.14), rgba(86, 136, 173, 0.14));
+}
+html[data-theme='dark'] .cal-cell.cal-saturday-cell {
+  background-image: linear-gradient(rgba(86, 136, 173, 0.12), rgba(86, 136, 173, 0.12));
+}
+/* 中国法定节假日格子的淡黄背景 (2026-09-23)
+   ⚠️ 必须放在祝日粉/周六蓝之后 —— 同特异性下"后写的胜", 这就是「周六是中秋时黄底要覆盖蓝底」的实现。
+     暗色块用 html[data-theme='dark'] (特异性 0,3,0) 且同样排在周末暗色块之后, 否则会被周末压回去。 */
+.cal-cell.cal-cn-holiday-cell {
+  background-image: linear-gradient(rgba(199, 160, 82, 0.34), rgba(199, 160, 82, 0.34));
+}
+html[data-theme='dark'] .cal-cell.cal-cn-holiday-cell {
+  background-image: linear-gradient(rgba(199, 160, 82, 0.24), rgba(199, 160, 82, 0.24));
+}
+/* 中国调休上班日「班」标签 (2026-09-23: 那天是周末补班, 不是休息) */
+.cal-day-num .cal-workday {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  flex: 0 1 auto;
+  min-width: 0;
+  letter-spacing: 0;
+}
+.cal-cell.cal-out .cal-day-num { color: var(--text-muted); }
+.cal-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;                        /* 占据剩余空间 */
+  overflow: hidden;               /* 内容超出截断 */
+  min-height: 0;
+}
+.cal-task {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  line-height: 1.3;
+  padding: 2px 4px;
+  background: var(--bg-section);
+  color: var(--text-primary);
+  cursor: pointer;
+  word-break: break-all;
+  display: flex; align-items: center; gap: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-height: 16px;
+  /* 拖拽改期 (2026-09-16): 保留垂直滚动, 水平手势留给拖拽逻辑 */
+  touch-action: pan-y;
+}
+/* 已完成任务弱化 (2026-08-18: 日历「显示已完成」开关开启时) */
+.cal-task.cal-task-done {
+  opacity: 0.55;
+  filter: saturate(0.4);
+  text-decoration: line-through;
+  text-decoration-color: rgba(16,19,28,0.5);
+}
+.cal-task:hover { filter: brightness(1.15); }
+
+/* ── 日历任务拖拽改期 (2026-09-16 v1): 桌面直接拖 / 手机长按拖 ── */
+.cal-task.cal-drag-armed {           /* 长按已触发, 等待移动 */
+  outline: 2px solid var(--color-brand);
+  outline-offset: -1px;
+}
+.cal-task.cal-task-dragging {        /* 拖拽中: 原位置留个淡影 */
+  opacity: 0.3;
+}
+.cal-drag-ghost {                    /* 跟随指针的拖影 */
+  position: fixed;
+  z-index: 500;
+  pointer-events: none;
+  padding: 2px 6px;
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  line-height: 1.3;
+  max-width: 150px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: var(--c-cyan);
+  color: #10131c;
+  border: 2px solid var(--color-brand);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+  opacity: 0.95;
+  transform: translate(-50%, -120%) scale(1.05);
+}
+.cal-drag-ghost.is-same {            /* 落回原日期: 提示无效 */
+  background: var(--bg-section);
+  color: var(--text-muted);
+  border-style: dashed;
+}
+.cal-cell.cal-drop-target {          /* 可放置目标格 */
+  background: var(--bg-section);
+  border-color: var(--color-brand);
+  border-style: dashed;
+}
+.cal-cell.cal-drop-target .cal-day-num { color: var(--color-brand); }
+/* 任务条整条背景 = 自选颜色（2026-08-11: 替代左侧竖条）;
+   文字用深色保证亮/暗模式在彩色背景上都清晰 (2026-08-11 实测暖白字在红/黄上不可读) */
+.cal-task.color-yellow { background: var(--c-yellow); color: #10131c; }
+.cal-task.color-green { background: var(--c-green); color: #10131c; }
+.cal-task.color-pink { background: var(--c-pink); color: #10131c; }
+.cal-task.color-purple { background: var(--c-purple); color: #10131c; }
+.cal-task.color-orange { background: var(--c-orange); color: #10131c; }
+.cal-task.color-red { background: var(--c-red); color: #10131c; }
+.cal-task.color-blue { background: var(--c-blue); color: #10131c; }
+.cal-task.color-cyan { background: var(--c-cyan); color: #10131c; }
+/* 跨天任务横条（2026-08-11 二版: 一条横跨, 名字只显示一次） */
+.cal-span-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  line-height: 1.2;
+  padding: 2px 6px;
+  height: 16px;              /* 与单日任务条同高 (2026-08-11: 原 20px 太粗) */
+  min-width: 0;
+  background: var(--bg-section);
+  color: var(--text-primary);
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  align-self: start;
+  margin-top: 20px;             /* 紧贴日期数字下方 (数字底 18px + 2px, 2026-08-11: 原 24px 太靠下) */
+  z-index: 2;
+  box-shadow: 2px 2px 0 var(--shadow-pixel);
+}
+.cal-span-bar:hover { filter: brightness(1.15); }
+.cal-span-bar.color-yellow { background: var(--c-yellow); color: #10131c; }
+.cal-span-bar.color-green { background: var(--c-green); color: #10131c; }
+.cal-span-bar.color-pink { background: var(--c-pink); color: #10131c; }
+.cal-span-bar.color-purple { background: var(--c-purple); color: #10131c; }
+.cal-span-bar.color-orange { background: var(--c-orange); color: #10131c; }
+.cal-span-bar.color-red { background: var(--c-red); color: #10131c; }
+.cal-span-bar.color-blue { background: var(--c-blue); color: #10131c; }
+.cal-span-bar.color-cyan { background: var(--c-cyan); color: #10131c; }
+/* 跨周续段: 不再显示标题, 只显示延续箭头 */
+.cal-span-bar-cont {
+  color: #10131c;
+  justify-content: center;
+}
+/* 跨天已完成任务横条弱化 (2026-08-18) */
+.cal-span-bar.cal-span-bar-done {
+  opacity: 0.55;
+  filter: saturate(0.4);
+  text-decoration: line-through;
+  text-decoration-color: rgba(16,19,28,0.5);
+}
+/* 有跨天横条的格子: 单日任务区下移避让 (2026-08-11: 28px→18px, 横条上移后缩小避让, 下面任务不被挤出) */
+.cal-cell-has-span .cal-tasks { margin-top: 18px; }
+.cal-task-title {
+  flex: 0 1 auto;                 /* 按内容宽度，不撑满（2026-08-13: 原 flex:1 导致短标题时项目名被推到最右, 中间大片空白） */
+  min-width: 0;                   /* 允许收缩 */
+  overflow: hidden;               /* 硬截断,不用省略号,最大化显示字符 */
+  white-space: nowrap;
+}
+/* 任务条内项目名: 深色小字紧跟标题, 硬截断 (2026-08-12 初版淡灰; 2026-08-13 加深——彩色背景上淡灰+opacity 看不见; 同日二次调整: 再淡 30% 保持主次) */
+.cal-task-project {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  color: inherit;                 /* 继承任务条深色文字 #10131c, 彩色背景上清晰可读 */
+  opacity: 0.7;                   /* 2026-08-13: 先 opacity 1 可见, 再淡 30% 区分主次 */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: clip;            /* 硬截断, 不要省略号 */
+  flex-shrink: 1;
+}
+.cal-more {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 1px 4px;
+  flex-shrink: 0;
+}
+.cal-more:hover { color: var(--color-brand); }
+
+/* 手机端日历尺寸 —— ⚠️ 本 @media 头在 2026-09-22 主题统一那次被误删,
+   导致手机端的 110px 行高/紧凑 padding 泄漏到全宽度; 2026-09-23 恢复。 */
+@media (max-width: 640px) {
+  /* 手机端横向占位压缩(2026-08-11): padding/gap/竖条都收紧,文字最大化 */
+  .calendar-grid { grid-auto-rows: 110px; gap: 2px; padding: 0 6px 10px; }  /* 2026-08-12: 96→110, 每格 4 任务完整显示 */
+  .calendar-weekdays { gap: 2px; padding: 0 6px 6px; }  /* 与 grid 列对齐 */
+  .cal-cell { height: 110px; min-height: 0; padding: 2px 1px 2px; gap: 2px; }  /* 2026-08-12: 72→110 */
+  .cal-task {
+    font-size: var(--fs-10);
+    font-family: var(--font-ui);
+    padding: 1px 1px; min-height: 14px; border-left-width: 2px;
+  }
+  /* 移动端: 任务条允许换行, 项目名换到第二行独占一行 (2026-08-13); 行距压到 2px 只微微分开 (2026-08-13 二次) */
+  .cal-task { flex-wrap: wrap; row-gap: 2px; column-gap: 4px; }
+  .cal-task-project {
+    flex-basis: 100%;
+    max-width: 100%;
+    flex-shrink: 0;
+  }
+  /* 移动端: 数字底只有 14px, 横条上移贴数字, 任务区避让同步缩小, 防止遮住单日任务 (2026-08-12) */
+  .cal-span-bar { margin-top: 16px; }
+  .cal-cell-has-span .cal-tasks { margin-top: 18px; }
+  /* 任务标题单行硬截断(2026-08-11: 不要自动换行) */
+  .cal-task-title {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  /* 项目菜单: 按钮全宽后 absolute 跟随即可(原 fixed 定位是按钮窄时的补丁, 2026-08-11 移除) */
+  .project-menu {
+    max-height: calc(100vh - 84px);
+    max-height: calc(100dvh - 84px);
+  }
+}
+
+/* ── Day Drawer (centered pixel modal) ── */
+.day-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.5);   /* 2026-09-22 与共享 .y8y-overlay 同值 */
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+  padding: 20px;
+}
+.day-drawer-overlay.open { display: flex; }
+.day-drawer {
+  background: var(--bg-canvas);
+  border: 3px solid var(--border-default);
+  box-shadow: 6px 6px 0 var(--shadow-pixel);
+  width: min(480px, 100%);
+  max-height: min(80vh, 600px);
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font-ui);
+}
+.day-drawer-header {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 2px solid var(--border-default);
+  background: var(--bg-section);
+  gap: 8px;
+}
+.day-drawer-title {
+  flex: 1;
+  font-size: var(--fs-13);
+  color: var(--text-primary);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.day-drawer-title .count {
+  color: var(--color-brand);
+  margin-left: 8px;
+}
+.day-drawer-add {
+  height: 32px;
+  padding: 0 10px;
+  background: var(--color-brand);
+  color: var(--bg-surface);
+  border: 2px solid var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--fs-12);
+  font-weight: bold;
+  letter-spacing: 1px;
+  cursor: pointer;
+  box-shadow: 2px 2px 0 var(--shadow-pixel);
+  display: flex; align-items: center; justify-content: center;
+  /* 2026-09-20 报告「icon 和文字糊在一起」：flex 容器会吃掉 HTML 里的
+     纯空白文本节点 → 图标与文字贴死（实测空隙 0px）。必须显式 gap。 */
+  gap: 5px;
+  white-space: nowrap;
+}
+.day-drawer-add:hover { background: var(--bg-surface); color: var(--color-brand); }
+.day-drawer-add:active {
+  transform: translate(2px, 2px);
+  box-shadow: 0px 0px 0 var(--shadow-pixel);
+}
+.day-drawer-add:focus-visible {
+  outline: 3px solid var(--color-brand);
+  outline-offset: 2px;
+}
+.day-drawer-close {
+  width: 32px; height: 32px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 2px solid var(--border-default);
+  font-family: var(--font-ui);
+  font-size: var(--fs-14);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 2px 2px 0 var(--shadow-pixel);
+  padding: 0;
+}
+.day-drawer-close:hover { background: var(--bg-section); }
+.day-drawer-close:active {
+  transform: translate(2px, 2px);
+  box-shadow: 0px 0px 0 var(--shadow-pixel);
+}
+.day-drawer-body {
+  padding: 12px 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+.day-drawer-body .card {
+  margin-bottom: 8px;
+}
+.day-drawer-empty {
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--fs-12);
+  padding: 32px 16px;
+  letter-spacing: 1px;
+}
+
+@media (max-width: 640px) {
+  .day-drawer { width: 100%; max-height: 85vh; }
+  .day-drawer-overlay { padding: 8px; }
+}
+
+/* ── Section ── */
+.section { margin: 6px 0; }
+.section-header {
+  padding: 12px 16px 6px;
+  font-size: var(--fs-12);
+  color: var(--text-primary);
+  display: flex; align-items: center; gap: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: bold;
+}
+.section-header .badge {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  background: var(--bg-section);
+  color: var(--text-muted);
+  padding: 2px 8px;
+  border: 1px solid var(--border-default);
+}
+.divider {
+  height: 0;
+  border: 0;
+  border-top: 2px solid var(--border-default);
+  margin: 0 16px 4px;
+}
+
+/* ── Card ── */
+.card {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 12px 16px;
+  margin: 0 12px 10px;
+  background: var(--bg-surface);
+  border: 3px solid var(--border-default);
+  cursor: pointer;
+  position: relative;
+  box-shadow: 6px 6px 0 var(--shadow-pixel),
+              inset 2px 2px 0 var(--highlight-pixel);
+}
+.card:active {
+  transform: translate(3px, 3px);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+}
+.card.done { opacity: 0.4; }
+.card-body { flex: 1; min-width: 0; }
+.card-title {
+  font-size: var(--fs-13);
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 3px;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  line-height: 1.7;
+}
+.card-preview {
+  font-size: var(--fs-11);
+  font-family: var(--font-ui);
+  color: var(--text-primary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* 2026-08-11: 预览最多 5 行, 不显示全文 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  overflow: hidden;
+}
+.card-meta {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+/* ── Card color: 左侧竖条 (2026-08-11: 整框变色颜色太多眼睛不舒服, 改回左竖条) ── */
+.card.color-yellow { border-left-width: 4px; border-left-color: var(--c-yellow); }
+.card.color-green { border-left-width: 4px; border-left-color: var(--c-green); }
+.card.color-pink { border-left-width: 4px; border-left-color: var(--c-pink); }
+.card.color-purple { border-left-width: 4px; border-left-color: var(--c-purple); }
+.card.color-orange { border-left-width: 4px; border-left-color: var(--c-orange); }
+.card.color-red { border-left-width: 4px; border-left-color: var(--c-red); }
+.card.color-blue { border-left-width: 4px; border-left-color: var(--c-blue); }
+.card.color-cyan { border-left-width: 4px; border-left-color: var(--c-cyan); }
+
+/* ── Color Picker (2026-08-11: 自选颜色) ── */
+.color-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0;
+}
+.color-swatch {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border-default);
+  border-radius: 50%;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.1s;
+}
+.color-swatch:hover { transform: scale(1.15); }
+.color-swatch.active {
+  border-color: var(--text-primary);
+  box-shadow: 0 0 0 2px var(--bg-section), 0 0 0 3px var(--text-primary);
+}
+.sw-yellow { background: var(--c-yellow); }
+.sw-green { background: var(--c-green); }
+.sw-pink { background: var(--c-pink); }
+.sw-purple { background: var(--c-purple); }
+.sw-orange { background: var(--c-orange); }
+.sw-red { background: var(--c-red); }
+.sw-blue { background: var(--c-blue); }
+.sw-cyan { background: var(--c-cyan); }
+
+/* ── Due Badge ── */
+.due-badge {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  padding: 2px 6px;
+  border: 1px solid var(--border-default);
+  color: var(--text-muted);
+  display: inline-block;
+  background: var(--bg-section);
+}
+.due-overdue {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+  font-weight: bold;
+}
+.due-today {
+  color: var(--color-info);
+  border-color: var(--color-info);
+  font-weight: bold;
+}
+.recurring-badge {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  padding: 2px 6px;
+  border: 1px solid var(--color-success);
+  color: var(--color-success);
+  font-weight: bold;
+  display: inline-block;
+  background: var(--bg-section);
+}
+
+/* ── Project Badge (2026-08-11: 颜色跟随任务自选色, 不再固定青色) ── */
+.project-badge {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  padding: 2px 6px;
+  border: 1px solid var(--color-info);
+  color: var(--color-info);
+  font-weight: bold;
+  display: inline-block;
+  /* 2026-09-20：「文字偏下 2.1px」已由**共享层根因修复**解决 ——
+     icons.css 把 .y8i 的 vertical-align 从 -0.18em 改为 middle。
+     这里不再需要局部 flex 补丁（保持单一来源；实测只靠共享规则即为 4.5/5.5 居中）。 */
+  letter-spacing: 0.5px;
+  background: var(--bg-section);
+}
+.project-badge.color-yellow { border-color: var(--c-yellow); color: var(--c-yellow); }
+.project-badge.color-green { border-color: var(--c-green); color: var(--c-green); }
+.project-badge.color-pink { border-color: var(--c-pink); color: var(--c-pink); }
+.project-badge.color-purple { border-color: var(--c-purple); color: var(--c-purple); }
+.project-badge.color-orange { border-color: var(--c-orange); color: var(--c-orange); }
+.project-badge.color-red { border-color: var(--c-red); color: var(--c-red); }
+.project-badge.color-blue { border-color: var(--c-blue); color: var(--c-blue); }
+.project-badge.color-cyan { border-color: var(--c-cyan); color: var(--c-cyan); }
+.project-group-header {
+  font-size: var(--fs-11);
+  font-family: var(--font-ui);
+  font-weight: bold;
+  color: var(--color-info);
+  padding: 12px 4px 4px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  border-bottom: 2px dashed var(--color-info);
+  margin: 16px 0 8px;
+}
+
+/* ── Checkbox (y8y controls — square, hard shadow, press feedback) ── */
+.checkbox {
+  width: 24px; height: 24px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  border: 2px solid var(--border-default);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  background: var(--bg-canvas);
+  box-shadow: 2px 2px 0 var(--shadow-pixel);
+}
+.checkbox:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+.checkbox.checked {
+  background: var(--color-success);
+  border-color: var(--color-success);
+  box-shadow: 2px 2px 0 var(--shadow-pixel);
+}
+/* 完成标记：Fusion Pixel 没有 ✓(U+2713) / ✗(U+2717) 这两个符号 ——
+   用文字会回落到系统字体，在像素界面里格外扎眼。改用项目自带的像素图标
+   (Pixelarticons check.svg, MIT)，与全站图标同一套 mask 机制，颜色随 currentColor。 */
+.checkbox.checked::after,
+.checkbox-done::after {
+  content: '';
+  width: 14px;
+  height: 14px;
+  background-color: currentColor;
+  -webkit-mask-image: url("assets/icons/ui/check.svg");
+  mask-image: url("assets/icons/ui/check.svg");
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+}
+.completed-card {
+  cursor: default;
+  opacity: 0.82;
+}
+.checkbox-done {
+  background: var(--color-success);
+  border-color: var(--color-success);
+  color: var(--bg-surface);
+  cursor: default;
+  font-size: var(--fs-14);
+  font-weight: bold;
+}
+.completed-badge {
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  padding: 2px 6px;
+  border: 1px solid var(--color-success);
+  color: var(--color-success);
+  font-weight: bold;
+  display: inline-block;
+  background: var(--bg-section);
+}
+
+/* ── Shopping View (2026-08-18 独立购物列表) ── */
+.shopping-listbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px 0;
+  flex-wrap: wrap;
+}
+.shopping-listbar .list-switcher {
+  position: relative;
+}
+.shopping-listbar .project-trigger {
+  border: 2px solid var(--border-default);
+  background: var(--bg-surface);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+  padding: 6px 10px;
+  font-size: var(--fs-12);
+  cursor: pointer;
+}
+.shopping-listbar .project-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 60;
+  background: var(--bg-surface); border: 2px solid var(--border-default);
+  box-shadow: 3px 3px 0 var(--shadow-pixel); min-width: 180px;
+}
+.shopping-list-owner {
+  font-size: var(--fs-11); color: var(--text-muted);
+  font-family: var(--font-ui);
+}
+.shopping-list-actions {
+  margin-left: auto; display: flex; gap: 6px;
+}
+.shopping-list-actions .btn {flex: 0 0 auto !important;}
+.shopping-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px 8px;
+}
+.shopping-bar input {
+  flex: 1; min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 2px solid var(--border-default);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+  font-family: var(--font-ui);
+  font-size: var(--fs-12);
+}
+.shopping-bar textarea {
+  flex: 1; min-width: 0;
+  height: 34px;
+  padding: 6px 10px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 2px solid var(--border-default);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+  font-family: var(--font-ui);
+  font-size: var(--fs-12);
+  resize: vertical;
+  line-height: 1.5;
+  box-sizing: border-box;
+}
+.shopping-bar input:focus-visible, .shopping-bar textarea:focus-visible {
+  outline: 3px solid var(--color-brand);
+  outline-offset: 2px;
+}
+.shopping-clear-row {
+  padding: 0 16px 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+.shopping-clear-btn {
+  flex: 0 0 auto !important;
+  padding: 5px 10px !important;
+  font-size: var(--fs-11);
+  font-family: var(--font-ui);
+}
+.shopping-item {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 12px 8px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 3px solid var(--border-default);
+  box-shadow: 4px 4px 0 var(--shadow-pixel);
+}
+.shopping-item-done {
+  opacity: 0.55;
+}
+.shopping-item-done .shopping-name {
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+  text-decoration-color: var(--color-brand);
+}
+.shopping-check {
+  flex: 0 0 auto;
+  width: 24px; height: 24px;
+  background: var(--bg-section);
+  color: var(--text-primary);
+  border: 2px solid var(--border-default);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-12);
+  line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 2px 2px 0 var(--shadow-pixel);
+  padding: 0;
+}
+.shopping-check:hover { background: var(--bg-canvas); }
+.shopping-check:focus-visible { outline: 3px solid var(--color-brand); outline-offset: 2px; }
+.shopping-check[aria-pressed="true"] {
+  color: var(--color-success);
+  border-color: var(--color-success);
+}
+.shopping-name {
+  flex: 1; min-width: 0;
+  font-size: var(--fs-13);
+  font-weight: 700;
+  line-height: 1.7;          /* 长文本多行时加行距, 不挤 (2026-08-20) */
+  color: var(--text-primary);
+  word-break: break-word;
+}
+.shopping-del {
+  flex: 0 0 auto;
+  width: 24px; height: 24px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 2px solid var(--border-default);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-12);
+  line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+}
+.shopping-del:hover { color: var(--color-danger); border-color: var(--color-danger); }
+.shopping-del:focus-visible { outline: 3px solid var(--color-brand); outline-offset: 2px; }
+
+/* 一键复制全文按钮 (2026-08-20) */
+.shopping-copy {
+  flex: 0 0 auto;
+  width: 24px; height: 24px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 2px solid var(--border-default);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-12);
+  line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+}
+.shopping-copy:hover { color: var(--color-brand); border-color: var(--color-brand); }
+.shopping-copy:focus-visible { outline: 3px solid var(--color-brand); outline-offset: 2px; }
+
+/* 编辑条目按钮 (2026-08-20) */
+.shopping-edit {
+  flex: 0 0 auto;
+  width: 24px; height: 24px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 2px solid var(--border-default);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-12);
+  line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+}
+.shopping-edit:hover { color: var(--color-info); border-color: var(--color-info); }
+.shopping-edit:focus-visible { outline: 3px solid var(--color-brand); outline-offset: 2px; }
+
+/* 编辑弹窗 textarea */
+.shop-edit-modal textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 120px;
+  padding: 8px 10px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 2px solid var(--border-default);
+  font-family: var(--font-ui);
+  font-size: var(--fs-13);
+  line-height: 1.6;
+  resize: vertical;
+}
+.shop-edit-modal textarea:focus { outline: 3px solid var(--color-brand); outline-offset: 1px; }
+.shopping-item-done .shopping-name { cursor: default; }
+.shopping-completed-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.shopping-completed-page {
+  color: var(--text-muted);
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  white-space: nowrap;
+}
+.shopping-completed-nav {
+  flex: 0 0 auto !important;
+  padding: 4px 8px !important;
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+}
+.shopping-completed-nav:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: .5;
+}
+
+/* ── Empty state ── */
+.empty-state {
+  text-align: center;
+  padding: 48px 20px;
+  color: var(--text-muted);
+  font-size: var(--fs-12);
+  line-height: 2;
+}
+
+/* ── Header ＋ 新建任务 (2026-08-11: 右上角纯 + 号, 无文字) ── */
+.add-task-btn {
+  background: var(--color-brand);
+  color: var(--bg-surface);
+  border-color: var(--text-primary);
+  font-size: var(--fs-16);
+  font-weight: bold;
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+}
+.add-task-btn:hover {
+  background: var(--bg-surface);
+  color: var(--color-brand);
+}
+.add-task-btn:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--shadow-pixel);
+}
+.add-task-btn:focus-visible {
+  outline: 3px solid var(--color-brand);
+  outline-offset: 3px;
+}
+
+/* ── Modal ── */
+/* 2026-09-22: z-index/background 收归共享 .y8y-overlay（见 shared/chrome/ui.css） */
+.modal-overlay {
+  display: none;
+  position: fixed; inset: 0;
+}
+.modal-overlay.open { display: block; }
+.modal {
+  position: fixed; bottom: 0; z-index: 301;
+  background: var(--bg-surface);
+  border-top: 3px solid var(--border-default);
+  padding: 0;
+  height: 100vh;              /* 全屏高度 (2026-08-11: 弹窗占满整屏) */
+  height: 100dvh;             /* 移动端动态视口,地址栏伸缩不遮挡 */
+  max-height: none;
+  display: flex;
+  flex-direction: column;     /* handle/h2/表单区/按钮栏 纵向铺满 */
+  left: 0; right: 0;
+  transform: translateY(100%);
+  transition: transform 0.25s ease;
+  box-shadow: 0 -8px 0 var(--shadow-pixel);
+}
+.modal-overlay.open .modal { transform: translateY(0); }
+/* settings 居中弹窗覆盖 .modal 的全屏 bottom-sheet 定位 (须在 .modal 规则之后) */
+.modal-overlay.open .modal.settings-modal {
+  transform: translate(-50%, -50%) scale(1);
+  opacity: 1;
+}
+.modal-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 24px 4px;
+  flex-shrink: 0;
+}
+.modal-topbar h2 {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+  padding: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 表单区自适应占满剩余高度,内容多时滚动; 按钮栏固定贴底 */
+.modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;   /* 2026-08-18: 滚动到底不穿透到背景主页面 */
+  -webkit-overflow-scrolling: touch;
+  padding: 0 24px;
+  display: flex;
+  flex-direction: column;
+}
+/* 弹窗打开时锁定背景 body 滚动 (2026-08-18: 防止滚动穿透主页面) */
+body.modal-locked {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+/* 「内容」文本框拉伸填满表单区剩余高度 (2026-08-11: 无底部空白)
+   ⚠️ 必须用直接子级选择器: 用后代选择器时, 每个 .form-row 里的**最后一个** .form-group
+   也会命中 (它们都是 div 的 last-of-type) → 那一格被压成 flex:1 1 0%, 手机端挤成 28px
+   (2026-09-23 手机端「截止时间」「项目」点不到的根因) */
+.modal-body > .form-group:last-of-type {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.modal-body > .form-group:last-of-type textarea {
+  flex: 1;
+  min-height: 80px;
+}
+/* 内容预览容器 (2026-08-13 方案A: markdown 渲染 + 可点 checkbox) */
+.content-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.content-label-row label { margin: 0; }
+.content-preview {
+  flex: 1;
+  min-height: 80px;
+  overflow-y: auto;
+  background: var(--bg-section);
+  border: 2px solid var(--border-default);
+  padding: 10px 12px;
+  font-size: var(--fs-12);
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+.content-preview .md-h1 { font-size: var(--fs-16); font-weight: bold; margin: 8px 0 4px; }
+.content-preview .md-h2 { font-size: var(--fs-13); font-weight: bold; margin: 6px 0 3px; }
+.content-preview .md-h3 { font-size: var(--fs-12); font-weight: bold; margin: 4px 0 2px; }
+.content-preview .md-p { margin: 3px 0; }
+.content-preview .md-li { margin: 2px 0; padding-left: 14px; position: relative; }
+.content-preview .md-li::before { content: '•'; position: absolute; left: 2px; }
+.content-preview .md-space { height: 6px; }
+.content-preview code {
+  background: var(--bg-canvas);
+  padding: 0 4px;
+  font-size: var(--fs-11);
+  font-family: var(--font-ui);
+  border: 1px solid var(--border-default);
+}
+.content-preview .md-empty { color: var(--text-muted); }
+/* checkbox 行: 可点击, hover 提示 */
+.content-preview .md-cb {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 2px 0;
+  padding: 2px 0;
+  cursor: pointer;
+  border-radius: 2px;
+}
+.content-preview .md-cb:hover { background: var(--bg-hover, var(--bg-canvas)); }
+.content-preview .md-cb input[type="checkbox"] {
+  margin-top: 3px;
+  accent-color: var(--color-brand);
+  cursor: pointer;
+  flex-shrink: 0;
+  /* 2026-08-15 修: .form-group input 的 width:100% 会把 checkbox 拉成整行宽,
+     文字被挤成 12px 窄列断成几百行 (用户报「toggle 按钮占绝大部分, 文字看不见」) */
+  width: 13px;
+  height: 13px;
+}
+.content-preview .md-cb.done span { text-decoration: line-through; opacity: 0.6; }
+.content-preview .md-cb span { word-break: break-word; white-space: pre-wrap; }
+/* 按钮栏: 顶部右侧 (2026-08-11: 删除/取消/保存放最上面右侧) */
+.modal-actions {
+  flex-shrink: 0;
+  display: flex; gap: 8px;
+}
+.modal-handle {
+  width: 40px; height: 4px;
+  background: var(--border-default);
+  margin: 16px auto 14px;
+  flex-shrink: 0;
+}
+.modal h2 {
+  font-size: var(--fs-14);
+  color: var(--text-primary);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  font-weight: bold;
+  /* 间距由 .modal-topbar 控制 (2026-08-11) */
+}
+.form-group { margin-bottom: 14px; }
+/* 日期 / 时间选择器：内容是纯数字（2026-10-22 / 09:30），走等宽像素字体，
+   数字成列对齐、读起来不跳。（2026-10-22 随 Fusion Pixel 迁移加入） */
+.form-group input[type="date"],
+.form-group input[type="time"] {
+  font-family: var(--font-ui);
+}
+.form-group label {
+  display: block;
+  font-size: var(--fs-10);
+  font-family: var(--font-ui);
+  color: var(--text-muted);
+  margin-bottom: 5px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.form-group input,
+.form-group select,
+.form-group textarea {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-canvas);
+  border: 2px solid var(--border-default);
+  color: var(--text-primary);
+  font-size: var(--fs-12);
+  font-family: var(--font-ui);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+}
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  outline: none;
+  border-color: var(--color-brand);
+  box-shadow: 3px 3px 0 var(--color-brand);
+}
+.form-group textarea {
+  resize: vertical;
+  min-height: 80px;
+  line-height: 1.8;  /* 2026-08-11: 内容行距太挤, 拓展开 */
+}
+.form-row { display: flex; gap: 10px; flex-wrap: wrap; }
+/* 窄屏一行塞不下 3 个字段时换行, 而不是让第 3 个挤出屏幕
+   (2026-09-23: 手机新建任务弹窗里「截止时间」跑到屏幕右边点不到)
+   ⚠️ flex-shrink 必须是 0 —— 允许收缩时 flex 会硬挤成 28px 而不是换行 */
+.form-row .form-group { flex: 1 0 140px; min-width: 0; }
+/* 旧的 .modal-actions margin-top 规则已并入上方全屏布局 (2026-08-11) */
+
+/* ── Buttons (y8y §action buttons) ── */
+.btn {flex: 1; font-family: var(--font-ui);}
+.btn:active {transform: translate(3px, 3px);}
+.btn:focus-visible {outline: 3px solid var(--color-brand); outline-offset: 3px;}
+
+/* ── Toast ── */
+.toast {
+  position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
+  background: var(--bg-section);
+  color: var(--text-primary);
+  padding: 10px 20px;
+  font-size: var(--fs-11);
+  font-family: var(--font-ui);
+  z-index: 400;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+  white-space: nowrap;
+  border: 2px solid var(--border-default);
+  box-shadow: 4px 4px 0 var(--shadow-pixel);
+}
+.toast.show { opacity: 1; }
+
+/* ── Responsive ── */
+/* ⚠️ 2026-09-22 主题统一那次把本区的 @media 头全部误删,
+   桌面端 4:3 卡片宽度因此泄漏到手机 (手机新建任务弹窗被撑到 760px、左右都出屏);
+   2026-09-23 恢复。改这段务必确认 @media 头/尾成对。 */
+@media (min-width: 600px) {
+  /* 桌面端 4:3 横屏卡片（2026-08-11）: 宽度 = min(视口高×4/3, 760px),
+     比原 480px 宽很多 → 日历格子更宽,任务标题能显示更多文字 */
+  :root { --desktop-w: min(calc(100vh * 4 / 3), 760px); }
+  body { max-width: var(--desktop-w); margin: 0 auto; }
+  .modal { left: calc((100vw - var(--desktop-w)) / 2); right: calc((100vw - var(--desktop-w)) / 2); }
+}
+
+@media (max-width: 390px) {
+  .header .count { display: none; }
+  .filter-bar { padding: 6px 12px; gap: 6px; }
+  .filter-bar .project-trigger {
+    padding: 0 7px;
+    font-size: var(--fs-10);
+    font-family: var(--font-ui);
+  }
+}
+
+/* ── prefers-reduced-motion (y8y §10 accessibility) ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+  /* Static CRT scanlines stay visible: reduced motion only disables movement. */
+}
+
+  /* 页面主体（header 之外）的图标统一 14px（2026-09-20 定案）。
+     特异性低于共享 header.css 的 .header .y8i（(0,2,0) vs (0,1,0)），
+     所以 header 里的图标仍保持 20px，不受这条影响。 */
+  .y8i { --y8i-size: var(--y8i-14, 14px); }
+  .header .view-tab:hover {opacity: 1;}
+  .header .view-tab:active {transform: none;}
+  /* 激活项: 图标染成品牌橙色 (mask 方案 = 改 currentColor 即可) */
+  .header .view-tab[aria-selected="true"] .y8i { color: var(--color-brand); }</style>
+</head>
+<body>
+
+<header class="header">
+  <a class="brand-img" href="/" title="y8yTODO 首页" aria-label="y8yTODO 首页">
+    <span class="brand-mark">
+      <img id="y8y-logo" src="assets/brand/y8y-logo.svg?v=0e6d917b" alt="y8y"
+           onerror="this.hidden=true; document.getElementById('y8y-wordmark').hidden=false;" />
+      <span id="y8y-wordmark" hidden class="logo-accent">y8y</span>
+    </span>
+  </a>
+  <!-- 2026-10-24: header 只保留 logo 图, 「y8yTODO」文字去掉。
+       页面标题改成 visually-hidden 的 <h1> —— 视觉上没了, 但文档结构与
+       读屏仍知道这一页是 y8y Todo (header 的 <a aria-label> 也还在)。 -->
+  <h1 class="visually-hidden">y8y Todo</h1>
+  
+  
+  <div class="header-right y8y-header-center">
+    <div class="view-tabs" role="tablist" aria-label="视图切换">
+      <!-- 2026-09-23：data-y8y-menu-label = 手机端进 ☰ 菜单后补的文字（header 上空间紧、只放图标，
+           菜单里没这个限制）—— 由共享 /assets/ui.js 在面板态生成 <span class="y8y-menu-label">、
+           宽屏还原时移除。 -->
+      <button class="view-tab y8y-seg-flat y8y-slot-item" id="viewTabList" role="tab" aria-selected="false" data-view="list" title="列表视图" data-y8y-menu-label="列表"><span class="y8i y8i-list"></span></button>
+      <button class="view-tab y8y-seg-flat y8y-slot-item" id="viewTabCalendar" role="tab" aria-selected="true" data-view="calendar" title="日历视图" data-y8y-menu-label="日历"><span class="y8i y8i-calendar"></span></button>
+      <button class="view-tab y8y-seg-flat y8y-slot-item" id="viewTabShopping" role="tab" aria-selected="false" data-view="shopping" title="购物列表" data-y8y-menu-label="购物"><span class="y8i y8i-cart"></span></button>
+    </div>
+  </div>
+
+  
+  
+  <!-- 右侧槽（容器契约 .y8y-header-right）：靠右由**容器**承担，所以组内顺序自由。
+       动作按钮（新建任务）：语义固化 —— 有副作用的动作放右侧、橙色，不进中间槽。 -->
+  <div class="y8y-header-right">
+    <button type="button" class="theme-toggle add-task-btn y8y-header-action" id="fabAdd" aria-label="新建任务" title="新建任务" data-y8y-menu-label="新建任务"><span class="y8i y8i-add"></span></button>
+    <button type="button" class="y8y-refresh-btn" title="刷新数据（不重载页面）" aria-label="刷新数据"><span class="y8i y8i-reload"></span></button>
+    <button type="button" class="settings-btn" id="settingsBtn" title="设置" aria-label="设置" aria-haspopup="dialog"><span class="y8i y8i-settings"></span></button>
+  </div>
+</header>
+
+<!-- Filter bar: 项目 + 时间并排 sticky (2026-08-11) -->
+<div class="filter-bar">
+  <div class="filter-cell filter-cell-project" id="filterCellProject">
+    <div class="project-switcher" id="projectSwitcher">
+      <button class="project-trigger" id="projectTrigger" type="button" aria-haspopup="menu" aria-expanded="false">
+        <span class="project-trigger-label" id="projectTriggerLabel"><span class="y8i y8i-bookmark"></span> 所有任务</span>
+        <span class="project-caret" aria-hidden="true"><span class="y8i y8i-expand"></span></span>
+      </button>
+      <div class="project-menu" id="projectMenu" role="menu" aria-label="选择项目"></div>
+    </div>
+  </div>
+  <div class="filter-cell filter-cell-time">
+    <div class="time-switcher" id="timeSwitcher">
+      <button class="project-trigger" id="timeTrigger" type="button" aria-haspopup="menu" aria-expanded="false">
+        <span class="project-trigger-label" id="timeTriggerLabel">全部</span>
+        <span class="project-caret" aria-hidden="true"><span class="y8i y8i-expand"></span></span>
+      </button>
+      <div class="project-menu" id="timeMenu" role="menu" aria-label="时间范围"></div>
+    </div>
+  </div>
+  <!-- 日历月份导航: 与项目筛选并排 (2026-08-12: 原独立一行占空间, 并入 filter-bar 右侧) -->
+  <div class="filter-cell filter-cell-calnav" id="calNavCell" style="display:none;">
+    <button class="theme-toggle calendar-nav" id="calPrev" type="button" aria-label="上个月"><span class="y8i y8i-pager" style="transform:scaleX(-1)"></span></button>
+    <div class="calendar-title" id="calTitle">—</div>
+    <button class="theme-toggle calendar-nav" id="calNext" type="button" aria-label="下个月"><span class="y8i y8i-pager"></span></button>
+    <button class="theme-toggle calendar-today" id="calToday" type="button" aria-label="回到今天">今日</button>
+  </div>
+</div>
+
+<!-- View: List -->
+<div id="viewList" class="view-pane" data-view="list" hidden>
+  <div id="taskList"></div>
+</div>
+
+<!-- View: Calendar -->
+<div id="viewCalendar" class="view-pane" data-view="calendar">
+  <div class="calendar-weekdays" aria-hidden="true">
+    <div>一</div><div>二</div><div>三</div><div>四</div><div>五</div><div>六</div><div>日</div>
+  </div>
+  <div class="calendar-grid" id="calendarGrid"></div>
+</div>
+
+<!-- View: Shopping (2026-08-18 独立购物列表, 升级为「列表系统」: 购物+自建列表, 可设归属) -->
+<div id="viewShopping" class="view-pane" data-view="shopping" hidden>
+  <div class="shopping-listbar">
+    <div class="list-switcher" id="listSwitcher">
+      <button class="project-trigger" id="listTrigger" type="button" aria-haspopup="menu" aria-expanded="false">
+        <span class="project-trigger-label" id="listTriggerLabel">购物</span>
+        <span class="project-caret" aria-hidden="true"><span class="y8i y8i-expand"></span></span>
+      </button>
+      <div class="project-menu" id="listMenu" role="menu" aria-label="选择列表"></div>
+    </div>
+    <span class="shopping-list-owner" id="shoppingListOwner"></span>
+    <div class="shopping-list-actions">
+      <button class="btn btn-primary y8y-btn y8y-btn-primary" id="listNewBtn" type="button" title="新建列表"><span class="y8i y8i-add"></span> 列表</button>
+      <button class="btn y8y-btn" id="listOwnerBtn" type="button" title="切换归属">归属</button>
+      <button class="btn btn-danger y8y-btn y8y-btn-danger" id="listDeleteBtn" type="button" title="删除该列表"><span class="y8i y8i-trash"></span> 删</button>
+    </div>
+  </div>
+  <div class="shopping-bar">
+    <textarea id="shoppingInput" rows="1" autocomplete="off" aria-label="物品名"></textarea>
+    <button class="theme-toggle add-task-btn" id="shoppingAdd" type="button" aria-label="添加物品" title="添加物品"><span class="y8i y8i-add"></span></button>
+  </div>
+  <div class="shopping-clear-row" id="shoppingClearRow" hidden>
+    <button class="btn btn-danger shopping-clear-btn y8y-btn y8y-btn-danger" id="shoppingClearDone" type="button"><span class="y8i y8i-trash"></span> 清空已购</button>
+  </div>
+  <div id="shoppingList"></div>
+</div>
+
+<!-- 列表条目编辑弹窗 (2026-08-20: 点击条目上的「编辑」直接改内容) -->
+<div class="modal-overlay y8y-overlay" id="shopEditOverlay" hidden>
+  <div class="modal shop-edit-modal">
+    <div class="modal-topbar">
+      <h2>编 辑 条 目</h2>
+      <div class="modal-actions">
+        <button class="btn btn-cancel y8y-btn y8y-btn-ghost" onclick="closeShopEdit()">取消</button>
+        <button class="btn btn-primary y8y-btn y8y-btn-primary" onclick="saveShopEdit()">保存</button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label>内容</label>
+        <textarea id="shopEditInput" rows="6" placeholder="条目内容"></textarea>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Day Drawer (centered pixel modal, opened by clicking a calendar cell) -->
+<div class="day-drawer-overlay" id="dayDrawerOverlay" role="dialog" aria-modal="true" aria-labelledby="dayDrawerTitle">
+  <div class="day-drawer" id="dayDrawer">
+    <div class="day-drawer-header">
+      <div class="day-drawer-title" id="dayDrawerTitle">—</div>
+      <button class="day-drawer-add" id="dayDrawerAdd" type="button" aria-label="添加任务"><span class="y8i y8i-add"></span> 添加任务</button>
+      <button class="day-drawer-close" id="dayDrawerClose" type="button" aria-label="关闭"><span class="y8i y8i-close"></span></button>
+    </div>
+    <div class="day-drawer-body" id="dayDrawerBody"></div>
+  </div>
+</div>
+
+<!-- Settings modal (我/共享 归属 + 主题) -->
+<div class="modal-overlay y8y-overlay y8y-under-header" id="settingsOverlay">
+  <div class="modal settings-modal" id="settingsModal">
+    <div class="modal-handle"></div>
+    <div class="modal-topbar">
+      <h2 id="settingsTitle">设 置</h2>
+      <div class="modal-actions">
+        <button class="btn btn-cancel y8y-btn y8y-btn-ghost" onclick="closeSettings()">关闭</button>
+      </div>
+    </div>
+    <div class="modal-body">
+<div class="settings-group y8y-settings-group">
+          <label class="settings-label y8y-settings-label">主题</label>
+          <div class="y8y-theme-switch" role="group" aria-label="主题切换">
+            <button type="button" class="y8y-theme-btn" data-y8y-theme="auto"><span class="y8i y8i-reload"></span> 自动</button>
+            <button type="button" class="y8y-theme-btn" data-y8y-theme="light"><span class="y8i y8i-sun"></span> 浅色</button>
+            <button type="button" class="y8y-theme-btn" data-y8y-theme="dark"><span class="y8i y8i-moon"></span> 深色</button>
+          </div>
+        </div>
+        <div class="settings-group y8y-settings-group">
+          <label class="settings-label y8y-settings-label">任务归属范围</label>
+        <div class="owner-toggle-group" role="group" aria-label="任务归属范围">
+          <button class="owner-toggle active y8y-seg-btn" id="ownerToggleMine" type="button" aria-pressed="true" data-scope="mine" title="显示自己的任务">我</button>
+          <button class="owner-toggle active y8y-seg-btn" id="ownerToggleShared" type="button" aria-pressed="true" data-scope="shared" title="显示共享的任务">共享</button>
+        </div>
+      </div>
+      <div class="settings-group y8y-settings-group">
+        <label class="settings-label y8y-settings-label">日历视图</label>
+        <div class="owner-toggle-group" role="group" aria-label="日历视图仅显示未完成">
+          <button class="owner-toggle y8y-seg-btn" id="calTodoOnlyBtn" type="button" aria-pressed="false" data-cal-todo="todo"><span class="y8i y8i-check"></span> 仅显示未完成</button>
+        </div>
+        <div class="settings-hint">默认显示所有任务（含已完成）；勾选后日历仅展示未完成任务</div>
+        <div class="owner-toggle-group" role="group" aria-label="中国节假日显示" style="margin-top:8px">
+          <button class="owner-toggle y8y-seg-btn" id="cnHolidayBtn" type="button" aria-pressed="true" title="在日历上标注中国法定节假日与调休上班日"><span class="y8i y8i-calendar"></span> 中国节假日</button>
+        </div>
+        <div class="settings-hint">默认跟随服务端配置（Y8Y_CN_HOLIDAYS / Y8Y_CN_HOLIDAY_USERS）；此开关为当前用户的本机覆盖，与身份无关</div>
+      </div>
+      <div class="settings-group y8y-settings-group">
+        <label class="settings-label y8y-settings-label">持久项目</label>
+        <div class="persistent-row">
+          <input type="text" id="persistentProjectInput" placeholder="项目名" list="persistentProjectOptions">
+          <button class="btn btn-primary y8y-btn y8y-btn-primary" id="persistentProjectAdd" type="button">添加</button>
+        </div>
+        <datalist id="persistentProjectOptions"></datalist>
+        <div class="persistent-project-list" id="persistentProjectList"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay y8y-overlay" id="modalOverlay">
+  <div class="modal" id="modal">
+    <div class="modal-handle"></div>
+    <div class="modal-topbar">
+      <h2 id="modalTitle">新 建 任 务</h2>
+      <div class="modal-actions" id="modalActions">
+        <button class="btn btn-cancel y8y-btn y8y-btn-ghost" onclick="closeModal()">取消</button>
+        <button class="btn btn-primary y8y-btn y8y-btn-primary" onclick="saveTask()">保存</button>
+      </div>
+    </div>
+    <div class="modal-body">
+    <div class="form-group">
+      <label>标题</label>
+      <input type="text" id="inputTitle" placeholder="任务名称">
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>截止日期</label>
+        <input type="date" id="inputDue">
+      </div>
+      <div class="form-group">
+        <label>结束日期（可选）</label>
+        <input type="date" id="inputDueEnd" title="跨多天的任务填结束日期，日历里会横跨显示；不填则只有截止日期">
+      </div>
+      <div class="form-group">
+        <label>截止时间（可选）</label>
+        <input type="time" id="inputDueTime" title="设定截止时间（具体时刻）">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>颜色</label>
+        <div class="color-picker" id="inputColor" role="radiogroup" aria-label="自选颜色">
+          <button type="button" class="color-swatch sw-yellow" data-color="yellow" title="黄色" role="radio" aria-label="黄色"></button>
+          <button type="button" class="color-swatch sw-green" data-color="green" title="绿色" role="radio" aria-label="绿色"></button>
+          <button type="button" class="color-swatch sw-pink" data-color="pink" title="粉色" role="radio" aria-label="粉色"></button>
+          <button type="button" class="color-swatch sw-purple" data-color="purple" title="紫色" role="radio" aria-label="紫色"></button>
+          <button type="button" class="color-swatch sw-orange" data-color="orange" title="橙色" role="radio" aria-label="橙色"></button>
+          <button type="button" class="color-swatch sw-red" data-color="red" title="红色" role="radio" aria-label="红色"></button>
+          <button type="button" class="color-swatch sw-blue" data-color="blue" title="蓝色" role="radio" aria-label="蓝色"></button>
+          <button type="button" class="color-swatch sw-cyan" data-color="cyan" title="青色" role="radio" aria-label="青色"></button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>归属</label>
+        <select id="inputOwner">
+          <option value="me">我的</option>
+          <option value="shared">共享</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>项目</label>
+        <input type="text" id="inputProject" list="projectOptions">
+      </div>
+    </div>
+    <!-- 项目下拉候选项 —— 由 JS 从 allTasks 动态填充，只列未完成项目 -->
+    <datalist id="projectOptions"></datalist>
+    <div class="form-group">
+      <div class="content-label-row">
+        <label>内容</label>
+        <button type="button" id="contentModeBtn" class="btn btn-mini y8y-btn" onclick="toggleContentMode()">预览</button>
+      </div>
+      <div id="contentPreview" class="content-preview" hidden></div>
+      <textarea id="inputContent" placeholder="任务描述（可选）"></textarea>
+    </div>
+    </div><!-- /modal-body -->
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let allTasks = [];
+let completedTasks = [];
+let sections = {};
+let currentUser = '';         // 来自 API current_user
+let showMine = true;        // 点亮「我」按钮
+let showShared = true;      // 点亮「共享」按钮（最少亮一个）
+let calTodoOnly = localStorage.getItem('todoCalTodoOnly') === '1';  // 日历仅显示未完成 (默认勾不选=显示所有含已完成)
+// 中国节假日显示 (O3-P1): 旧实现把节假日硬编码给单一用户名 (currentUser === 'alice'),
+// 公开部署下其他用户永远看不到。现在 = 服务端按身份的默认值 + 本机覆盖。
+let cnHolidaysServerDefault = true;   // 来自 GET /todo/api/tasks 的 preferences
+let cnHolidaysEnabled = true;         // 当前是否显示 (默认值 × 本机覆盖)
+function cnHolidaysKey() { return 'todoCnHolidays_' + (currentUser || ''); }
+function loadCnHolidaysPref() {
+  try {
+    const v = localStorage.getItem(cnHolidaysKey());
+    if (v === '1') return true;
+    if (v === '0') return false;
+  } catch (e) {}
+  return cnHolidaysServerDefault;
+}
+const PROJECT_ALL = '__all__';
+const PROJECT_NONE = '__none__';
+const VALID_TIME_FILTERS = new Set(['all', 'overdue', 'today', 'week', 'nodue', 'completed']);
+const VALID_VIEWS = new Set(['list', 'calendar', 'shopping']);
+const DEFAULT_VIEW = 'calendar';   // 打开页面默认进入日历视图 (2026-09-29)
+let currentProject = PROJECT_ALL;
+let currentTimeFilter = 'all';
+let currentView = DEFAULT_VIEW;
+let calendarCursor = new Date(); // 日历当前查看的月份（任意一天）
+calendarCursor.setDate(1);
+let editingId = null;
+let creatingProject = false;
+let shoppingItems = [];   // 当前列表条目 (2026-08-18 列表系统, 不混入任务)
+const SHOPPING_COMPLETED_PAGE_SIZE = 10;
+let shoppingCompletedPage = 0;
+let listObjects = [];     // 所有可见列表 {id,name,owner,created}
+let currentListId = 'shopping';  // 当前选中的列表 id
+
+const SECTION_CONFIG = [
+  { key: 'overdue', icon: '▰', label: '过期任务' },
+  { key: 'today', icon: '◆', label: '今日到期' },
+  { key: 'this_week', icon: '▸', label: '本周到期' },
+  { key: 'future', icon: '▭', label: '远期' },
+  // ∞(U+221E) 不在 Fusion Pixel 里（会回落到系统字体）—— 用同一组几何符号里的 ○。
+  { key: 'nodue', icon: '○', label: '无期限' },
+];
+
+async function loadTasks() {
+  try {
+    const res = await fetch('/todo/api/tasks');
+    const data = await res.json();
+    if (!res.ok) {
+      showToast('✗ ' + (data.error || '加载失败'));
+      return;
+    }
+    allTasks = data.tasks;
+    completedTasks = data.completed_tasks || [];
+    sections = data.sections;
+    // O3-P1: 不再把缺失的 current_user 静默改写成某个固定身份 — 认证异常
+    // 必须保持"未识别", 由后续请求以 401/403 响亮失败, 而不是冒充用户。
+    currentUser = data.current_user || '';
+    // 中国节假日显示偏好: 服务端按身份给出的默认值 + 本机覆盖 (见设置面板)
+    cnHolidaysServerDefault =
+      (data.preferences && typeof data.preferences.cn_holidays === 'boolean')
+        ? data.preferences.cn_holidays : true;
+    cnHolidaysEnabled = loadCnHolidaysPref();
+    renderProjectMenu();
+    render();
+    refreshProjectDatalist();
+    loadPersistentProjects();   // 2026-08-12: 持久项目从后端加载 (跨设备)
+  } catch (e) {
+    showToast('加载失败: ' + e.message);
+  }
+}
+
+function readViewStateFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const project = params.get('project');
+  currentProject = project === '~none' ? PROJECT_NONE : (project || PROJECT_ALL);
+  const time = params.get('time') || 'all';
+  currentTimeFilter = VALID_TIME_FILTERS.has(time) ? time : 'all';
+  const view = params.get('view') || DEFAULT_VIEW;
+  currentView = VALID_VIEWS.has(view) ? view : DEFAULT_VIEW;
+  const owner = params.get('owner');
+  if (owner === 'mine') { showMine = true; showShared = false; }
+  else if (owner === 'shared') { showMine = false; showShared = true; }
+  else { showMine = true; showShared = true; }
+}
+
+function syncViewUrl(mode = 'push') {
+  const params = new URLSearchParams();
+  if (currentView !== DEFAULT_VIEW) params.set('view', currentView);
+  if (currentProject === PROJECT_NONE) params.set('project', '~none');
+  else if (currentProject !== PROJECT_ALL) params.set('project', currentProject);
+  if (currentTimeFilter !== 'all') params.set('time', currentTimeFilter);
+  // owner 状态: 两亮=默认不写; 只亮一个才写
+  if (showMine && !showShared) params.set('owner', 'mine');
+  else if (!showMine && showShared) params.set('owner', 'shared');
+  const next = window.location.pathname + (params.toString() ? `?${params}` : '');
+  history[mode === 'replace' ? 'replaceState' : 'pushState']({}, '', next);
+}
+
+function applyView() {
+  document.getElementById('viewList').hidden = (currentView !== 'list');
+  document.getElementById('viewCalendar').hidden = (currentView !== 'calendar');
+  document.getElementById('viewShopping').hidden = (currentView !== 'shopping');
+  document.getElementById('viewTabList').setAttribute('aria-selected', currentView === 'list');
+  document.getElementById('viewTabCalendar').setAttribute('aria-selected', currentView === 'calendar');
+  document.getElementById('viewTabShopping').setAttribute('aria-selected', currentView === 'shopping');
+  // 购物视图: 项目/时间 filter-bar 与日历导航都不显示 (无筛选概念)
+  const filterBar = document.querySelector('.filter-bar');
+  if (filterBar) filterBar.style.display = (currentView === 'shopping') ? 'none' : '';
+  // 日历视图: 隐藏项目筛选下拉（2026-08-18: 左上角项目下拉去掉）+ 时间筛选隐藏; list 视图反之
+  const projectCell = document.getElementById('filterCellProject');
+  if (projectCell) projectCell.style.display = (currentView === 'calendar') ? 'none' : '';
+  const timeCell = document.querySelector('.filter-cell-time');
+  if (timeCell) timeCell.style.display = (currentView === 'calendar') ? 'none' : '';
+  const calNav = document.getElementById('calNavCell');
+  if (calNav) calNav.style.display = (currentView === 'calendar') ? '' : 'none';
+}
+
+function setView(view) {
+  if (!VALID_VIEWS.has(view)) return;
+  if (view === currentView) return;
+  currentView = view;
+  applyView();
+  syncViewUrl('push');
+  if (view === 'calendar') {
+    renderCalendar();
+  } else if (view === 'shopping') {
+    renderShopping();
+  } else {
+    // 切回 list 必须重新渲染: deep-link 直接进 calendar/shopping 时 render() 走了
+    // 对应分支 return,taskList 从未渲染过,不调 render() 会白屏
+    render();
+  }
+}
+
+function changeCalendarMonth(delta) {
+  // delta = -1 (prev) / +1 (next)
+  const d = new Date(calendarCursor);
+  d.setMonth(d.getMonth() + delta);
+  calendarCursor = d;
+  renderCalendar();
+}
+
+function gotoCalendarToday() {
+  calendarCursor = new Date();
+  calendarCursor.setDate(1);
+  renderCalendar();
+}
+
+function applyOwnerScope(tasks) {
+  // 后端已按身份过滤（自己+共享），前端按按钮点亮状态再筛
+  return tasks.filter(t => {
+    const owner = t.owner || currentUser;
+    if (owner === 'shared') return showShared;
+    return showMine;
+  });
+}
+
+function getScopedTasks() {
+  let base;
+  if (currentProject === PROJECT_ALL) base = [...allTasks];
+  else if (currentProject === PROJECT_NONE) base = allTasks.filter(t => !t.project);
+  else base = allTasks.filter(t => t.project === currentProject);
+  return applyOwnerScope(base);
+}
+
+function getScopedCompletedTasks() {
+  let base;
+  if (currentProject === PROJECT_ALL) base = [...completedTasks];
+  else if (currentProject === PROJECT_NONE) base = [];
+  else base = completedTasks.filter(t => t.project === currentProject);
+  return applyOwnerScope(base);
+}
+
+// 日历 view 任务集: 默认显示所有(含已完成); 勾选「仅显示未完成」时只留未完成 (2026-08-18)
+function getCalendarTasks() {
+  const active = getScopedTasks();
+  if (calTodoOnly) return active;   // 勾选「仅显示未完成」→ 只未完成
+  const done = getScopedCompletedTasks();
+  const seen = new Set(active.map(t => t.id));
+  return active.concat(done.filter(t => !seen.has(t.id)));
+}
+
+function toggleOwnerScope(scope) {
+  // 点亮/熄灭按钮；最少亮一个（不允许全灭）
+  const next = { mine: showMine, shared: showShared };
+  next[scope] = !next[scope];
+  if (!next.mine && !next.shared) return;  // 会全灭 → 拒绝
+  if (scope === 'mine') showMine = next.mine;
+  else if (scope === 'shared') showShared = next.shared;
+  updateOwnerControls();
+  syncViewUrl('push');
+  render();
+}
+
+function updateOwnerControls() {
+  const mineBtn = document.getElementById('ownerToggleMine');
+  const sharedBtn = document.getElementById('ownerToggleShared');
+  if (mineBtn) {
+    mineBtn.classList.toggle('active', showMine);
+    mineBtn.setAttribute('aria-pressed', showMine ? 'true' : 'false');
+  }
+  if (sharedBtn) {
+    sharedBtn.classList.toggle('active', showShared);
+    sharedBtn.setAttribute('aria-pressed', showShared ? 'true' : 'false');
+  }
+}
+
+function taskMatchesTime(task, filter) {
+  if (filter === 'all') return true;
+  if (filter === 'nodue') return !task.due;
+  const sectionKey = filter === 'week' ? 'this_week' : filter;
+  return (sections[sectionKey] || []).includes(task.id);
+}
+
+function getFilteredTasks(filter = currentTimeFilter) {
+  if (filter === 'completed') return getScopedCompletedTasks();
+  return getScopedTasks().filter(task => taskMatchesTime(task, filter));
+}
+
+function currentProjectLabel() {
+  if (currentProject === PROJECT_ALL) return '所有任务';
+  if (currentProject === PROJECT_NONE) return '无项目';
+  return currentProject;
+}
+
+const TIME_FILTER_CONFIG = [
+  { key: 'all', label: '全部' },
+  { key: 'overdue', label: '▰ 过期' },
+  { key: 'today', label: '◆ 今日' },
+  { key: 'week', label: '▸ 本周' },
+  { key: 'nodue', label: '○ 无期限' },     // ○(U+25CB) 在像素字体里；∞ 不在
+  { key: 'completed', label: '☑ 已完成' },   // ☑(U+2611) 在像素字体里；✓ 不在
+];
+const TIME_FILTER_LABEL = Object.fromEntries(TIME_FILTER_CONFIG.map(c => [c.key, c.label]));
+
+function updateViewControls() {
+  document.getElementById('projectTriggerLabel').innerHTML = '<span class="y8i y8i-bookmark"></span> ' + escapeHtml(currentProjectLabel());
+  document.getElementById('timeTriggerLabel').textContent = TIME_FILTER_LABEL[currentTimeFilter] || '全部';
+}
+
+function makeProjectMenuItem(label, count, scope) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'project-menu-item';
+  button.setAttribute('role', 'menuitem');
+  button.setAttribute('aria-current', currentProject === scope ? 'true' : 'false');
+  const name = document.createElement('span');
+  name.className = 'project-menu-name';
+  name.innerHTML = label;
+  const badge = document.createElement('span');
+  badge.className = 'project-menu-count';
+  badge.textContent = count;
+  button.append(name, badge);
+  button.addEventListener('click', () => selectProject(scope));
+  return button;
+}
+
+function renderProjectMenu() {
+  const menu = document.getElementById('projectMenu');
+  menu.replaceChildren();
+  menu.append(makeProjectMenuItem('<span class="y8i y8i-bookmark"></span> 所有任务', allTasks.length, PROJECT_ALL));
+  const noProjectCount = allTasks.filter(t => !t.project).length;
+  menu.append(makeProjectMenuItem('<span class="y8i y8i-bookmark"></span> 无项目', noProjectCount, PROJECT_NONE));
+
+  const counts = new Map();
+  for (const task of allTasks) {
+    if (!task.project) continue;
+    counts.set(task.project, (counts.get(task.project) || 0) + 1);
+  }
+  // 2026-08-11: 全完成项目默认隐藏; 只有「持久项目」才继续显示
+  const persistent = new Set(getPersistentProjects());
+  const completedOnlyProjects = new Map();
+  for (const task of completedTasks) {
+    if (!task.project || counts.has(task.project)) continue;
+    if (!persistent.has(task.project)) continue;   // 非持久: 全部完成 → 隐藏
+    completedOnlyProjects.set(task.project, (completedOnlyProjects.get(task.project) || 0) + 1);
+  }
+  for (const [project, count] of completedOnlyProjects) counts.set(project, count);
+  // 持久项目即使名下没有任何任务也一直显示 (2026-08-12)
+  for (const proj of persistent) {
+    if (!counts.has(proj)) counts.set(proj, 0);
+  }
+  if (counts.size) {
+    const divider = document.createElement('hr');
+    divider.className = 'project-menu-divider';
+    menu.append(divider);
+    for (const [project, count] of [...counts].sort((a, b) => a[0].localeCompare(b[0], 'zh'))) {
+      // 项目图标统一 bookmark（2026-09-20 定：不需要 hash，全部用 bookmark）
+      menu.append(makeProjectMenuItem(`<span class="y8i y8i-bookmark"></span> ${escapeHtml(project)}`, count, project));
+    }
+  }
+
+  const create = document.createElement('button');
+  create.type = 'button';
+  create.className = 'project-menu-item create';
+  create.setAttribute('role', 'menuitem');
+  create.innerHTML = '<span class="y8i y8i-add"></span> 新建项目';
+  create.addEventListener('click', openNewProjectModal);
+  menu.append(create);
+}
+
+function openProjectMenu() {
+  document.getElementById('projectMenu').classList.add('open');
+  document.getElementById('projectTrigger').setAttribute('aria-expanded', 'true');
+}
+
+function closeProjectMenu() {
+  document.getElementById('projectMenu').classList.remove('open');
+  document.getElementById('projectTrigger').setAttribute('aria-expanded', 'false');
+}
+
+function selectProject(scope) {
+  currentProject = scope;
+  currentTimeFilter = 'all';
+  closeProjectMenu();
+  syncViewUrl('push');
+  renderProjectMenu();
+  render();
+}
+
+// ── Time filter dropdown (和项目同款) ──
+function makeTimeMenuItem(label, count, key) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'project-menu-item';
+  button.setAttribute('role', 'menuitem');
+  button.setAttribute('aria-current', currentTimeFilter === key ? 'true' : 'false');
+  const name = document.createElement('span');
+  name.className = 'project-menu-name';
+  name.textContent = label;
+  const badge = document.createElement('span');
+  badge.className = 'project-menu-count';
+  badge.textContent = count;
+  button.append(name, badge);
+  button.addEventListener('click', () => selectTimeFilter(key));
+  return button;
+}
+
+function renderTimeMenu() {
+  const menu = document.getElementById('timeMenu');
+  if (!menu) return;
+  menu.replaceChildren();
+  for (const cfg of TIME_FILTER_CONFIG) {
+    const count = getFilteredTasks(cfg.key).length;
+    menu.append(makeTimeMenuItem(cfg.label, count, cfg.key));
+  }
+}
+
+function openTimeMenu() {
+  renderTimeMenu();
+  document.getElementById('timeMenu').classList.add('open');
+  document.getElementById('timeTrigger').setAttribute('aria-expanded', 'true');
+}
+
+function closeTimeMenu() {
+  document.getElementById('timeMenu').classList.remove('open');
+  document.getElementById('timeTrigger').setAttribute('aria-expanded', 'false');
+}
+
+function selectTimeFilter(key) {
+  currentTimeFilter = key;
+  closeTimeMenu();
+  syncViewUrl('push');
+  updateViewControls();
+  render();
+}
+
+function getDaysLeft(dueStr) {
+  if (!dueStr) return null;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const due = new Date(dueStr + 'T00:00:00');
+  const diff = Math.floor((due - today) / (1000*60*60*24));
+  return diff;
+}
+
+function formatDue(dueStr) {
+  if (!dueStr) return '';
+  const diff = getDaysLeft(dueStr);
+  if (diff < 0) return `过期${-diff}天`;
+  if (diff === 0) return '今天到期';
+  if (diff === 1) return '明天到期';
+  return `剩${diff}天`;
+}
+
+function getDueClass(dueStr) {
+  if (!dueStr) return '';
+  const diff = getDaysLeft(dueStr);
+  if (diff < 0) return 'due-overdue';
+  if (diff === 0) return 'due-today';
+  return '';
+}
+
+function getPreview(body, title) {
+  if (!body) return '';
+  const preview = body.replace(/^#+\s*/gm, '').replace(/[*_~`]/g, '').trim();
+  // 2026-08-20: 预览里不重复正文(=标题) —— 如果正文去掉 markdown 后与标题完全相同,
+  // 说明 body 只是复制了 title, 则不显示预览, 避免 title 在预览里重复一遍
+  if (title && preview === (title || '').trim()) return '';
+  return preview;
+}
+
+function sortTasksByCompletedDesc(list) {
+  list.sort((a, b) => {
+    const aDate = a.completed || '';
+    const bDate = b.completed || '';
+    if (aDate !== bDate) return bDate.localeCompare(aDate);
+    return (a.title || '').localeCompare(b.title || '', 'zh');
+  });
+}
+
+function sortTasksByDueAsc(list) {
+  list.sort((a, b) => {
+    const aDue = a.due || '9999';
+    const bDue = b.due || '9999';
+    if (aDue !== bDue) return aDue.localeCompare(bDue);
+    return (a.title || '').localeCompare(b.title || '', 'zh');
+  });
+}
+
+function render() {
+  applyView();
+  updateViewControls();
+  updateOwnerControls();
+  renderTimeMenu();
+
+  if (currentView === 'calendar') {
+    renderCalendar();
+    return;
+  }
+
+  if (currentView === 'shopping') {
+    renderShopping();
+    return;
+  }
+
+  const container = document.getElementById('taskList');
+
+  let html = '';
+  const tasks = getFilteredTasks();
+  if (tasks.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = `★ ${currentProjectLabel()} · 当前筛选没有任务`;
+    container.replaceChildren(empty);
+    return;
+  }
+
+  if (currentTimeFilter === 'completed') {
+    html += `<div class="section">`;
+    html += `<div class="section-header completed-section-header"><span class="y8i y8i-check"></span> 已完成 <span class="badge">${tasks.length}</span></div>`;
+    html += `<div class="divider"></div>`;
+    sortTasksByCompletedDesc(tasks);
+    for (const task of tasks) html += renderCard(task, true);
+    html += `</div>`;
+  } else if (currentTimeFilter === 'all') {
+    // 2026-08-20: 主页去掉「过期/今日/本周/远期」桶, 改成按到期日期分组 (升序), 无日期任务单独「无期限」放最后
+    const DOW = ['日','一','二','三','四','五','六'];
+    const groups = {};   // key: due(YYYY-MM-DD) 或 '__nodue__'
+    for (const t of tasks) groups[t.due || '__nodue__'] = (groups[t.due || '__nodue__'] || []).concat(t);
+    const keys = Object.keys(groups).filter(k => k !== '__nodue__').sort();  // 日期升序(字符串 YYYY-MM-DD 天然可排序)
+    if (groups['__nodue__']) keys.push('__nodue__');  // 无日期放最后
+    for (const key of keys) {
+      const group = groups[key];
+      const firstKey = key === '__nodue__' ? '__nodue__' : key;
+      let header;
+      if (key === '__nodue__') {
+        header = `○ 无期限 <span class="badge">${group.length}</span>`;
+      } else {
+        const d = new Date(firstKey + 'T00:00:00');
+        const diff = getDaysLeft(firstKey);
+        let rel = '';
+        if (diff < 0) rel = ` · 过期${-diff}天`;
+        else if (diff === 0) rel = ' · 今天';
+        else if (diff === 1) rel = ' · 明天';
+        else rel = ` · 剩${diff}天`;
+        header = `${firstKey.slice(5)} 周${DOW[d.getDay()]}${rel}<span class="badge">${group.length}</span>`;
+      }
+      html += `<div class="section">`;
+      html += `<div class="section-header">${header}</div>`;
+      html += `<div class="divider"></div>`;
+      sortTasksByDueAsc(group);
+      for (const task of group) html += renderCard(task);
+      html += `</div>`;
+    }
+  } else {
+    sortTasksByDueAsc(tasks);
+    html += `<div class="section">`;
+    for (const task of tasks) html += renderCard(task);
+    html += `</div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+function refreshProjectDatalist() {
+  const dl = document.getElementById('projectOptions');
+  if (!dl) return;
+  const counts = new Map();
+  for (const t of allTasks) {
+    if (!t.project) continue;
+    if (t.status !== 'todo') continue;
+    counts.set(t.project, (counts.get(t.project) || 0) + 1);
+  }
+  // 2026-08-11: 全完成且非持久项目不进候选列表
+  const persistent = new Set(getPersistentProjects());
+  const completedOnly = new Set();
+  for (const t of completedTasks) {
+    if (!t.project || counts.has(t.project)) continue;
+    if (!persistent.has(t.project)) continue;
+    completedOnly.add(t.project);
+  }
+  for (const name of completedOnly) counts.set(name, 0);
+  // 持久项目即使名下没有任何任务也进候选 (2026-08-12)
+  for (const proj of persistent) {
+    if (!counts.has(proj)) counts.set(proj, 0);
+  }
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  // DOM API 构建, 不用 innerHTML 插值 (y8y §8.4 安全: 项目名是用户输入; 也兼容中文/空格)
+  dl.innerHTML = '';
+  for (const [name, n] of sorted) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = n > 0 ? `▤ ${name}（${n} 子任务）` : `▤ ${name}（全部完成）`;
+    dl.appendChild(opt);
+  }
+}
+
+function renderCard(task, isCompleted = false) {
+  const diff = getDaysLeft(task.due);
+  const dueText = formatDue(task.due);
+  const dueClass = getDueClass(task.due);
+  const preview = getPreview(task.body, task.title);
+  // 任务标题/正文/项目名均为用户内容 —— 插入 innerHTML 前必须转义 (XSS 防护)
+  const titleText = escapeHtml(task.title);
+
+  const cardClass = isCompleted ? 'card completed-card' : 'card';
+  // 2026-08-11: 卡片外框直接显示任务颜色 (替代左下角小方块)
+  const colorClass = ` color-${task.color || 'green'}`;
+  // 2026-08-18: 已完成任务也可点击编辑 + checkbox 可 toggle 恢复 (design-note: 日历里能看到勾掉并继续改/toggle回)
+  const cardOpen = ` onclick="openEdit('${encodeURIComponent(task.id)}')"`;
+  const checkbox = isCompleted
+    ? `<div class="checkbox checkbox-done" aria-label="已完成，点击恢复" onclick="event.stopPropagation();unmarkDone('${encodeURIComponent(task.id)}')" title="点击恢复"></div>`
+    : `<div class="checkbox" onclick="event.stopPropagation();markDone('${encodeURIComponent(task.id)}')" id="cb-${encodeURIComponent(task.id)}"></div>`;
+  return `<div class="${cardClass}${colorClass}"${cardOpen}>
+    ${checkbox}
+    <div class="card-body">
+      <div class="card-title">
+        <span>${titleText}</span>
+      </div>
+      ${preview ? `<div class="card-preview">${escapeHtml(preview)}</div>` : ''}
+      <div class="card-meta">
+        ${task.due ? `<span class="due-badge ${dueClass}">${dueText}</span>` : ''}
+        ${task.due && task.due_end && task.due_end.slice(0,10) > task.due.slice(0,10) ? `<span class="due-badge">↔ ${formatDue(task.due_end)}</span>` : ''}
+        ${isCompleted && task.completed ? `<span class="completed-badge"><span class="y8i y8i-check"></span> ${task.completed} 完成</span>` : ''}
+        ${task.recurring ? '<span class="recurring-badge"><span class="y8i y8i-recurring"></span> RECUR</span>' : ''}
+        ${task.owner === 'shared' ? '<span class="shared-badge"><span class="y8i y8i-bookmark"></span> 共享</span>' : ''}
+        ${task.project && currentProject === PROJECT_ALL ? `<span class="project-badge color-${task.color || 'green'}"><span class="y8i y8i-bookmark"></span> ${escapeHtml(task.project)}</span>` : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
+async function markDone(encodedId) {
+  const id = decodeURIComponent(encodedId);
+  try {
+    const res = await fetch(`/todo/api/tasks/${encodeURIComponent(id)}/done`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      showToast(data.message === 'Task completed' ? '✓ 已完成' : '↻ 已更新下次日期');
+      loadTasks();
+    } else {
+      showToast('✗ ' + (data.error || '操作失败'));
+    }
+  } catch (e) {
+    showToast('✗ ' + e.message);
+  }
+}
+
+// 恢复已完成任务为未完成 (2026-08-18: 日历/列表里点到勾掉的✓即 toggle 回来)
+async function unmarkDone(encodedId) {
+  const id = decodeURIComponent(encodedId);
+  try {
+    const res = await fetch(`/todo/api/tasks/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ status: 'todo' }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast('↻ 已恢复为未完成');
+      loadTasks();
+    } else {
+      showToast('✗ ' + (data.error || '恢复失败'));
+    }
+  } catch (e) {
+    showToast('✗ ' + e.message);
+  }
+}
+
+// ── Calendar View ──
+function pad2(n) { return String(n).padStart(2, '0'); }
+function ymd(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
+
+// ── 日本祝日 (2026-08-12: 显示在日历日期右侧) ──
+// 固定祝日 + 2025-2027 春分/秋分(天文日) + 周一规则; 振替休日按「周日顺延到最近非祝日」计算
+const JP_FIXED_HOLIDAYS = [
+  ['01-01', '元日'], ['02-11', '建国記念の日'], ['02-23', '天皇誕生日'],
+  ['04-29', '昭和の日'], ['05-03', '憲法記念日'], ['05-04', 'みどりの日'],
+  ['05-05', 'こどもの日'], ['08-11', '山の日'], ['11-03', '文化の日'],
+  ['11-23', '勤労感謝の日'],
+];
+const JP_MONTH_WEEKDAY = [
+  { month: 1, weekday: 1, n: 2, name: '成人の日' },      // 1月第2周一
+  { month: 7, weekday: 1, n: 3, name: '海の日' },        // 7月第3周一
+  { month: 9, weekday: 1, n: 3, name: '敬老の日' },      // 9月第3周一
+  { month: 10, weekday: 1, n: 2, name: 'スポーツの日' }, // 10月第2周一
+];
+const JP_EQUINOX = {  // 春分/秋分 (日本标准日, 天文计算; 2025-2027 硬编码够用)
+  '2025': ['03-20', '09-23'], '2026': ['03-20', '09-23'], '2027': ['03-21', '09-23'],
+  '2028': ['03-20', '09-22'], '2024': ['03-20', '09-22'],
+};
+const jpHolidayCache = {};
+function getJpHolidays(year) {
+  if (jpHolidayCache[year]) return jpHolidayCache[year];
+  const h = new Map();  // 'YYYY-MM-DD' -> 名称
+  const y = String(year);
+  const add = (mmdd, name) => h.set(`${y}-${mmdd}`, name);
+  for (const [mmdd, name] of JP_FIXED_HOLIDAYS) add(mmdd, name);
+  const eq = JP_EQUINOX[y];
+  if (eq) { add(eq[0], '春分の日'); add(eq[1], '秋分の日'); }
+  for (const { month, weekday, n, name } of JP_MONTH_WEEKDAY) {
+    const d = new Date(year, month - 1, 1);
+    const firstDow = d.getDay();
+    let day = 1 + ((weekday - firstDow + 7) % 7) + (n - 1) * 7;
+    add(`${pad2(month)}-${pad2(day)}`, name);
+  }
+  // 振替休日: 祝日落在周日 → 顺延到最近的非祝日
+  const keys = [...h.keys()];
+  for (const k of keys) {
+    const d = new Date(k + 'T00:00:00');
+    if (d.getDay() !== 0) continue;
+    let next = new Date(d);
+    next.setDate(next.getDate() + 1);
+    while (h.has(ymd(next))) next.setDate(next.getDate() + 1);
+    if (!h.has(ymd(next))) h.set(ymd(next), '振替休日');
+  }
+  // 国民の休日: 前后两天都是祝日的平日 (如 2026-09-22 夹在敬老の日与秋分の日之间)
+  const start = new Date(year, 0, 1), end = new Date(year, 11, 31);
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    const k = ymd(d);
+    if (h.has(k) || d.getDay() === 0 || d.getDay() === 6) continue;
+    const prev = new Date(d); prev.setDate(prev.getDate() - 1);
+    const next = new Date(d); next.setDate(next.getDate() + 1);
+    if (h.has(ymd(prev)) && h.has(ymd(next))) h.set(k, '国民の休日');
+  }
+  jpHolidayCache[year] = h;
+  return h;
+}
+
+// ── 中国法定节假日 (2026-09-23: 与日本祝日同款显示在日期右侧; O3-P1 起改为可配置) ──
+// 中国的放假安排由国务院逐年公布(含调休连休), 不像日本能靠规则推算 → 逐年硬编码官方通知原文;
+// 未收录的年份只标「节日本身」(固定公历日 + 农历节日对应的公历日)。
+// 来源: 2025 = 国办发明电〔2024〕12号; 2026 = 国办发明电〔2025〕7号。
+const CN_HOLIDAY_SCHEDULE = {
+  '2025': {
+    ranges: [
+      ['01-01', '01-01', '元旦'], ['01-28', '02-04', '春节'], ['04-04', '04-06', '清明节'],
+      ['05-01', '05-05', '劳动节'], ['05-31', '06-02', '端午节'], ['10-01', '10-08', '国庆节'],
+    ],
+    overrides: { '10-06': '中秋节' },   // 2025 国庆中秋连休, 10/6 当天是中秋
+    // 调休上班日 (周末补班): 1/26(日)、2/8(六)、4/27(日)、9/28(日)、10/11(六)
+    workdays: ['01-26', '02-08', '04-27', '09-28', '10-11'],
+  },
+  '2026': {
+    ranges: [
+      ['01-01', '01-03', '元旦'], ['02-15', '02-23', '春节'], ['04-04', '04-06', '清明节'],
+      ['05-01', '05-05', '劳动节'], ['06-19', '06-21', '端午节'], ['09-25', '09-27', '中秋节'],
+      ['10-01', '10-07', '国庆节'],
+    ],
+    overrides: {},
+    // 调休上班日: 1/4(日)、2/14(六)、2/28(六)、5/9(六)、9/20(日)、10/10(六)
+    workdays: ['01-04', '02-14', '02-28', '05-09', '09-20', '10-10'],
+  },
+};
+// 节日本身 (国务院还没公布安排 / 早年年份用): 固定公历日 + 农历节日的公历日
+const CN_FESTIVALS = {
+  '2024': [['01-01', '元旦'], ['02-10', '春节'], ['04-04', '清明节'], ['05-01', '劳动节'], ['06-10', '端午节'], ['09-17', '中秋节'], ['10-01', '国庆节']],
+  '2025': [['01-01', '元旦'], ['01-29', '春节'], ['04-04', '清明节'], ['05-01', '劳动节'], ['05-31', '端午节'], ['10-06', '中秋节'], ['10-01', '国庆节']],
+  '2026': [['01-01', '元旦'], ['02-17', '春节'], ['04-05', '清明节'], ['05-01', '劳动节'], ['06-19', '端午节'], ['09-25', '中秋节'], ['10-01', '国庆节']],
+  '2027': [['01-01', '元旦'], ['02-06', '春节'], ['04-05', '清明节'], ['05-01', '劳动节'], ['06-09', '端午节'], ['09-15', '中秋节'], ['10-01', '国庆节']],
+};
+const CN_FIXED_FESTIVALS = [['01-01', '元旦'], ['05-01', '劳动节'], ['10-01', '国庆节']];
+const cnHolidayCache = {};
+// 返回 { holidays: Map('YYYY-MM-DD'->名称), workdays: Set('YYYY-MM-DD') }
+// workdays = 国务院公布的「周末补班日」(调休上班); 没有公布安排的年份为空集 (无法推算)
+function getCnYearData(year) {
+  if (cnHolidayCache[year]) return cnHolidayCache[year];
+  const holidays = new Map();
+  const workdays = new Set();
+  const y = String(year);
+  const sch = CN_HOLIDAY_SCHEDULE[y];
+  if (sch) {
+    for (const [from, to, name] of sch.ranges) {
+      const d = new Date(`${y}-${from}T00:00:00`);
+      const last = new Date(`${y}-${to}T00:00:00`);
+      while (d <= last) { holidays.set(ymd(d), name); d.setDate(d.getDate() + 1); }
+    }
+    for (const [mmdd, name] of Object.entries(sch.overrides || {})) holidays.set(`${y}-${mmdd}`, name);
+    for (const mmdd of (sch.workdays || [])) workdays.add(`${y}-${mmdd}`);
+  } else {
+    for (const [mmdd, name] of (CN_FESTIVALS[y] || CN_FIXED_FESTIVALS)) holidays.set(`${y}-${mmdd}`, name);
+  }
+  const data = { holidays, workdays };
+  cnHolidayCache[year] = data;
+  return data;
+}
+// ── 中国节假日/调休上班日显示偏好 (O3-P1) ──────────────────────────────
+// 旧实现: 只给固定用户名 'alice' 看 (currentUser === 'alice'), 其他人拿到空表。
+// 现在: 可配置功能 — 服务端默认 (Y8Y_CN_HOLIDAYS / Y8Y_CN_HOLIDAY_USERS)
+// × 用户本机覆盖 (localStorage, 按身份分键), 与任何用户名解耦。
+function cnHolidaysFor(year) {
+  return cnHolidaysEnabled ? getCnYearData(year).holidays : new Map();
+}
+function cnWorkdaysFor(year) {
+  return cnHolidaysEnabled ? getCnYearData(year).workdays : new Set();
+}
+
+function renderCalendar() {
+  const titleEl = document.getElementById('calTitle');
+  const gridEl = document.getElementById('calendarGrid');
+  if (!titleEl || !gridEl) return;
+
+  const year = calendarCursor.getFullYear();
+  const month = calendarCursor.getMonth();
+  titleEl.textContent = `${year} · ${pad2(month + 1)}`;
+
+  // 当前月第一天 / 视图网格起点（周一为一周开始, 2026-08-12 由周日改）
+  const firstOfMonth = new Date(year, month, 1);
+  const gridStart = new Date(firstOfMonth);
+  gridStart.setDate(firstOfMonth.getDate() - ((firstOfMonth.getDay() + 6) % 7));
+
+  const todayStr = ymd(new Date());
+
+  // 任务按覆盖日期聚合（YYYY-MM-DD → [task]）；跨天任务(due_end)展开到每一天；过滤掉无 due
+  const byDay = new Map();
+  const addToDay = (key, task) => {
+    if (!byDay.has(key)) byDay.set(key, []);
+    byDay.get(key).push(task);
+  };
+  for (const t of getCalendarTasks()) {   // 日历开关: 可含已完成 (2026-08-18)
+    if (!t.due) continue;
+    const start = t.due.slice(0, 10);
+    const end = t.due_end && t.due_end.slice(0, 10) > start ? t.due_end.slice(0, 10) : start;
+    let cur = new Date(start + 'T00:00:00');
+    const last = new Date(end + 'T00:00:00');
+    while (cur <= last) {
+      addToDay(ymd(cur), t);
+      cur.setDate(cur.getDate() + 1);
+    }
+  }
+  // 按截止时间排序（时间早的优先）
+  for (const list of byDay.values()) {
+    list.sort((a, b) => {
+      const at = a.due_time || '';
+      const bt = b.due_time || '';
+      return at.localeCompare(bt);
+    });
+  }
+
+  const cells = [];
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(gridStart);
+    d.setDate(gridStart.getDate() + i);
+    const isOut = d.getMonth() !== month;
+    const key = ymd(d);
+    const dayTasks = byDay.get(key) || [];
+    const isToday = key === todayStr;
+    cells.push({ date: d, key, isOut, isToday, dayTasks });
+  }
+
+  // 分离跨天任务：它们不再每天重复显示 chip，而是渲染成横跨多列的 bar（名字只显示一次）
+  const isSpan = (t) => t.due_end && t.due_end.slice(0, 10) > t.due.slice(0, 10);
+  const spanTasks = new Map();  // task.id → { task, startIdx, endIdx }
+  const cellHasSpan = new Set();  // 被 bar 覆盖的 cell index → 单日任务下移避让
+
+  const MAX_PER_CELL = 4;  // 2026-08-12: 3→4, 行高加大后每格显示更多
+  gridEl.replaceChildren();
+
+  // 第一遍：算出跨天任务在网格内的起止 index（YYYY-MM-DD 字典序 = 日期序）
+  const keys = cells.map(c => c.key);
+  const firstKey = keys[0], lastKey = keys[41];
+  for (const t of getCalendarTasks()) {   // 跨天任务也用日历开关集 (2026-08-18)
+    if (!t.due || !isSpan(t)) continue;
+    const start = t.due.slice(0, 10);
+    const end = t.due_end.slice(0, 10);
+    if (end < firstKey || start > lastKey) continue;  // 完全在当前网格外
+    const startIdx = start <= firstKey ? 0 : keys.findIndex(k => k >= start);
+    const endIdx = end >= lastKey ? 41 : keys.findIndex(k => k > end) - 1;
+    if (startIdx < 0 || endIdx < startIdx) continue;
+    spanTasks.set(t.id, { task: t, startIdx, endIdx });
+    for (let i = startIdx; i <= endIdx; i++) cellHasSpan.add(i);
+  }
+
+  // 第二遍：渲染格子（显式 grid 定位，防止 bar 参与自动排布打乱顺序）
+  for (let i = 0; i < 42; i++) {
+    const cell = cells[i];
+    const cellEl = document.createElement('div');
+    cellEl.className = 'cal-cell';
+    if (cell.isOut) cellEl.classList.add('cal-out');
+    if (cell.isToday) cellEl.classList.add('cal-today');
+    if (cellHasSpan.has(i)) cellEl.classList.add('cal-cell-has-span');
+    cellEl.style.gridColumn = String((i % 7) + 1);
+    cellEl.style.gridRow = String(Math.floor(i / 7) + 1);
+    cellEl.dataset.date = cell.key;   // 拖拽改期的落点标识 (2026-09-16)
+
+    const dayNum = document.createElement('div');
+    dayNum.className = 'cal-day-num';
+    dayNum.textContent = String(cell.date.getDate());
+    cellEl.appendChild(dayNum);
+    // 日本祝日显示在日期右侧 (2026-08-12) + 格子淡粉背景; 周日粉层; 周六淡蓝 (2026-08-12)
+    // 中国法定节假日: 淡黄底 + 节日名, 由设置面板开关控制 (O3-P1 起不再绑定用户名); 调休上班日挂「班」标签 (2026-09-23)
+    const isSunday = cell.date.getDay() === 0;
+    const isSaturday = cell.date.getDay() === 6;
+    const holidayName = getJpHolidays(cell.date.getFullYear()).get(cell.key);
+    const cnHolidayName = cnHolidaysFor(cell.date.getFullYear()).get(cell.key);
+    // 调休上班的那天其实是工作日 → 不涂周末底色(周六蓝/周日粉), 以免和「班」标签打架
+    const isCnWorkday = cnWorkdaysFor(cell.date.getFullYear()).has(cell.key);
+    const showCnHoliday = !!cnHolidayName && !isCnWorkday;
+
+    if (isSaturday && !isCnWorkday) cellEl.classList.add('cal-saturday-cell');
+    // 日本祝日永远保留(那是真节日); 周日粉层 / 中国节假日遇调休上班则让位
+    if (holidayName || ((showCnHoliday || isSunday) && !isCnWorkday)) {
+      cellEl.classList.add('cal-holiday-cell');
+      for (const [nm, cls] of [[holidayName, 'cal-holiday'], [showCnHoliday ? cnHolidayName : null, 'cal-holiday']]) {
+        if (!nm) continue;
+        const tag = document.createElement('span');
+        tag.className = cls;
+        tag.textContent = nm;
+        tag.title = nm;
+        dayNum.appendChild(tag);
+      }
+    }
+    // 中国节假日淡黄底 (放在周末/祝日底色规则之后 → 撞周六周日时黄底覆盖)
+    if (showCnHoliday) cellEl.classList.add('cal-cn-holiday-cell');
+    if (isCnWorkday) {
+      const tag = document.createElement('span');
+      tag.className = 'cal-workday';
+      tag.textContent = '班';
+      tag.title = '调休上班日（周末补班）';
+      dayNum.appendChild(tag);
+    }
+
+    const list = document.createElement('div');
+    list.className = 'cal-tasks';
+    // 只显示单日任务（跨天任务由 bar 表示）
+    const dayOnly = cell.dayTasks.filter(t => !isSpan(t));
+    const visible = dayOnly.slice(0, MAX_PER_CELL);
+    for (const task of visible) {
+      const item = document.createElement('div');
+      // 已完成任务弱化显示 (2026-08-18: 日历显示已完成开关开启时)
+      const doneCls = task.status === 'done' || task.completed ? ' cal-task-done' : '';
+      item.className = `cal-task color-${task.color || 'green'}${doneCls}`;  // 竖条颜色 = 自选颜色
+      item.title = `${task.title} · ${task.due}${task.due_end ? ' → ' + task.due_end : ''}${task.due_time ? ' ' + task.due_time : ''} · ${task.color || 'green'}`;
+      // 拖拽改期用 (2026-09-16): 单日 chip 带任务 id + 当前日期
+      item.dataset.taskId = task.id;
+      item.dataset.date = task.due.slice(0, 10);
+      // 不在这里绑 onclick —— 点击 chip 冒泡到 cell,统一打开当日 drawer;
+      // 任务内容在 drawer 里点卡片再打开 (openEdit)
+
+      const titleSpan = document.createElement('span');
+      titleSpan.className = 'cal-task-title';
+      titleSpan.textContent = task.title;
+      item.appendChild(titleSpan);
+      // 项目名淡灰小字跟在标题后, 硬截断 (2026-08-12)
+      if (task.project) {
+        const projSpan = document.createElement('span');
+        projSpan.className = 'cal-task-project';
+        projSpan.textContent = task.project;
+        projSpan.title = task.project;
+        item.appendChild(projSpan);
+      }
+
+      list.appendChild(item);
+    }
+    const overflow = dayOnly.length - visible.length;
+    if (overflow > 0) {
+      const more = document.createElement('div');
+      more.className = 'cal-more';
+      more.textContent = `+${overflow} 更多`;
+      more.onclick = (ev) => {
+        ev.stopPropagation();
+        openDayDrawer(cell.key);
+      };
+      list.appendChild(more);
+    }
+    cellEl.appendChild(list);
+    // 点格子任意位置（含 chip / +N 更多）→ 打开当日 drawer,不直接进任务内容
+    cellEl.addEventListener('click', () => {
+      openDayDrawer(cell.key);
+    });
+    gridEl.appendChild(cellEl);
+  }
+
+  // 第三遍：渲染跨天横条（名字只显示一次；跨周分段，续段只显示延续箭头）
+  // 名字位置：优先显示在「今天」所在的段（今天在任务范围内时），否则显示在开始段
+  for (const { task, startIdx, endIdx } of spanTasks.values()) {
+    let s = startIdx;
+    // 找名字该放哪一段：含今天的段优先，否则第一段
+    let nameRow = null;
+    if (todayStr >= task.due.slice(0, 10) && todayStr <= task.due_end.slice(0, 10)) {
+      const todayIdx = keys.findIndex(k => k >= todayStr);
+      if (todayIdx >= startIdx && todayIdx <= endIdx) {
+        nameRow = Math.floor(todayIdx / 7);
+      }
+    }
+    while (s <= endIdx) {
+      const row = Math.floor(s / 7);
+      const rowEnd = Math.min(row * 7 + 6, endIdx);
+      const segStart = s;   // 修复闭包陷阱: s 是外层 let, 循环结束后变 endIdx+1, 必须复制当前段起点
+      const isNameSegment = (row === nameRow) || (nameRow === null && s === startIdx);
+      const bar = document.createElement('div');
+      // 2026-08-18: 跨天已完成任务横条也弱化显示
+      const spanDoneCls = (task.status === 'done' || task.completed) ? ' cal-span-bar-done' : '';
+      bar.className = `cal-span-bar color-${task.color || 'green'}${spanDoneCls}`;
+      if (!isNameSegment) bar.classList.add('cal-span-bar-cont');
+      bar.style.gridColumn = `${(segStart % 7) + 1} / ${(rowEnd % 7) + 2}`;
+      bar.style.gridRow = String(row + 1);
+      bar.title = `${task.title} · ${task.due} → ${task.due_end}${task.due_time ? ' ' + task.due_time : ''}`;
+      if (isNameSegment) {
+        const txt = document.createElement('span');
+        txt.textContent = task.title;
+        bar.appendChild(txt);
+        // 2026-09-20：跨天横条上不再显示 bookmark（「共享」标记已移除，
+        // 横条本身有颜色/标题，图标在细条里只会挤占文字空间）。
+      } else {
+        bar.textContent = '↳';
+      }
+      bar.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        // 点击横条 → 打开「当天」任务列表（drawer），不进编辑；
+        // 用点击 x 坐标算出落在本段第几列 → 对应日期（2026-08-11 修复）
+        const rect = bar.getBoundingClientRect();
+        const frac = rect.width > 0 ? (ev.clientX - rect.left) / rect.width : 0;
+        const cols = rowEnd - segStart + 1;               // 本段覆盖的列数
+        const colOffset = Math.max(0, Math.min(cols - 1, Math.floor(frac * cols)));
+        const dayKey = cells[segStart + colOffset].key;
+        openDayDrawer(dayKey);
+      });
+      gridEl.appendChild(bar);
+      s = rowEnd + 1;
+    }
+  }
+
+  initCalendarDrag();   // 幂等: 拖拽改期监听 (2026-09-16)
+}
+
+// ══════════════════════════════════════════════════════════════
+// 日历任务拖拽改期 (2026-09-16 v1)
+//   桌面: 按住移动超过阈值即开始拖
+//   手机: 长按 220ms 进入拖拽 (否则会和页面滚动打架)
+//   落点: PUT /todo/api/tasks/<id> {due} → 失败重绘回滚, 成功给可点击撤销的 toast
+//   范围: 单日 chip (含已完成 chip, 2026-09-20 起); 跨天 bar 与边缘自动翻月属 v1.5/v2
+//   已完成 chip: 只改 due(计划日期), done/<归档日>/ 目录不动 (后端 done 分支支持)
+//   2026-09-20 (design-note「拖完有延迟」): 改成乐观 UI —— 松手立即本地落位(不等网络),
+//     PUT 后台跑, 同一任务串行化; 成功后不再整轮 loadTasks(), 只延后静默对账。
+// ══════════════════════════════════════════════════════════════
+const CAL_DRAG_LONGPRESS_MS = 220;
+const CAL_DRAG_THRESHOLD_PX = 6;
+
+let calDrag = null;                // 当前拖拽会话
+let calDragSuppressClick = false;  // 拖完吞掉一次 click (否则会弹出当日 drawer)
+
+function initCalendarDrag() {
+  const gridEl = document.getElementById('calendarGrid');
+  if (!gridEl || gridEl._calDragBound) return;
+  gridEl._calDragBound = true;
+  gridEl.addEventListener('pointerdown', calDragPointerDown);
+  gridEl.addEventListener('pointermove', calDragPointerMove);
+  gridEl.addEventListener('pointerup', calDragPointerUp);
+  gridEl.addEventListener('pointercancel', calDragPointerUp);
+  // 长按进入拖拽后, 只有拦掉 touchmove 才能真正阻止页面跟着滚
+  gridEl.addEventListener('touchmove', (ev) => {
+    if (calDrag && calDrag.active) ev.preventDefault();
+  }, { passive: false });
+  // 拖动结束紧随其后的 click 一律吞掉 (capture 阶段, 早于格子的 drawer 逻辑)
+  document.addEventListener('click', (ev) => {
+    if (!calDragSuppressClick) return;
+    calDragSuppressClick = false;
+    // ⚠️ 2026-09-20 修复: 只吞「落在日历网格里」的那次尾随 click。
+    // 原来是无条件吞掉「下一次任意点击」 —— 拖完去点 toast 的「点此撤销」或新建/切视图
+    // 按钮时, 那第一下会被吃掉(表现为点了没反应, 要再点一次)。
+    const inGrid = ev.target && ev.target.closest ? ev.target.closest('#calendarGrid') : null;
+    if (!inGrid) return;                 // 网格外的点击照常放行 (标志已清, 不会赖着)
+    ev.stopPropagation();
+    ev.preventDefault();
+  }, true);
+}
+
+function calDragPointerDown(ev) {
+  if (typeof currentView !== 'undefined' && currentView !== 'calendar') return;
+  if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+  const chip = ev.target && ev.target.closest ? ev.target.closest('.cal-task') : null;
+  if (!chip || !chip.dataset.taskId) return;
+  // 已完成任务同样可拖 (2026-09-20 修复): 只改 due, 不动 done/ 归档日期
+
+  calDragSuppressClick = false;
+  calDrag = {
+    chip,
+    pointerId: ev.pointerId,
+    pointerType: ev.pointerType,
+    startX: ev.clientX,
+    startY: ev.clientY,
+    taskId: chip.dataset.taskId,
+    fromDate: chip.dataset.date,
+    active: false,
+    timer: null,
+    ghost: null,
+    targetCell: null,
+  };
+  if (ev.pointerType !== 'mouse') {
+    calDrag.timer = setTimeout(calDragArm, CAL_DRAG_LONGPRESS_MS);
+  }
+}
+
+function calDragArm() {
+  if (!calDrag || calDrag.active) return;
+  calDrag.active = true;
+  clearTimeout(calDrag.timer);
+  calDrag.timer = null;
+  const chip = calDrag.chip;
+  chip.classList.add('cal-drag-armed', 'cal-task-dragging');
+  try { chip.setPointerCapture(calDrag.pointerId); } catch (e) {}
+  const ghost = document.createElement('div');
+  ghost.className = 'cal-drag-ghost';
+  const t = chip.querySelector('.cal-task-title');
+  ghost.textContent = t ? t.textContent : chip.textContent;
+  document.body.appendChild(ghost);
+  calDrag.ghost = ghost;
+  if (navigator.vibrate) { try { navigator.vibrate(12); } catch (e) {} }
+}
+
+function calDragPointerMove(ev) {
+  if (!calDrag || ev.pointerId !== calDrag.pointerId) return;
+  const dx = ev.clientX - calDrag.startX;
+  const dy = ev.clientY - calDrag.startY;
+  if (!calDrag.active) {
+    if (Math.hypot(dx, dy) <= CAL_DRAG_THRESHOLD_PX) return;
+    if (calDrag.pointerType !== 'mouse') { calDragAbort(); return; }  // 手机没长按就移动 = 用户在滚动
+    calDragArm();
+  }
+  if (!calDrag.active) return;
+  if (ev.cancelable) ev.preventDefault();
+  if (calDrag.ghost) {
+    calDrag.ghost.style.left = ev.clientX + 'px';
+    calDrag.ghost.style.top = ev.clientY + 'px';
+  }
+  const cell = calCellFromPoint(ev.clientX, ev.clientY);
+  if (cell !== calDrag.targetCell) {
+    if (calDrag.targetCell) calDrag.targetCell.classList.remove('cal-drop-target');
+    calDrag.targetCell = cell;
+    if (cell) cell.classList.add('cal-drop-target');
+  }
+  const isSame = !cell || cell.dataset.date === calDrag.fromDate;
+  if (calDrag.ghost) calDrag.ghost.classList.toggle('is-same', isSame);
+}
+
+function calCellFromPoint(x, y) {
+  const el = document.elementFromPoint(x, y);
+  if (!el || !el.closest) return null;
+  const cell = el.closest('.cal-cell');
+  return (cell && cell.dataset.date) ? cell : null;   // 落在日历外 → 无有效落点
+}
+
+function calDragPointerUp(ev) {
+  if (!calDrag || ev.pointerId !== calDrag.pointerId) return;
+  const wasActive = calDrag.active;
+  const taskId = calDrag.taskId;
+  const fromDate = calDrag.fromDate;
+  const cell = calDrag.targetCell;
+  const toDate = cell ? cell.dataset.date : '';
+  calDragTeardown();
+  if (!wasActive) return;                 // 普通点击 → 交回格子的 drawer 逻辑
+  calDragSuppressClick = true;
+  // 尾随 click 只会毫秒级到达; 超过窗口就作废, 免得标志赖着吃掉后续无关点击 (2026-09-20)
+  setTimeout(() => { calDragSuppressClick = false; }, 600);
+  if (!toDate || toDate === fromDate) { renderCalendar(); return; }   // 原位 / 无效落点
+  calDragCommit(taskId, toDate, fromDate);
+}
+
+function calDragAbort() { calDragTeardown(); renderCalendar(); }
+
+function calDragTeardown() {
+  if (!calDrag) return;
+  clearTimeout(calDrag.timer);
+  const chip = calDrag.chip;
+  if (chip) {
+    chip.classList.remove('cal-drag-armed', 'cal-task-dragging');
+    try { chip.releasePointerCapture(calDrag.pointerId); } catch (e) {}
+  }
+  if (calDrag.targetCell) calDrag.targetCell.classList.remove('cal-drop-target');
+  if (calDrag.ghost) calDrag.ghost.remove();
+  calDrag = null;
+}
+
+// 同一任务的提交串行化: 慢网络下连续拖拽时, 防止两个 PUT 乱序落库(最终 due 变旧值)
+const calTaskChains = new Map();
+
+function calTaskChain(taskId, fn) {
+  const prev = calTaskChains.get(taskId) || Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  calTaskChains.set(taskId, next);
+  next.catch(() => {}).finally(() => {
+    if (calTaskChains.get(taskId) === next) calTaskChains.delete(taskId);
+  });
+  return next;
+}
+
+// 乐观更新: 直接改内存里那条任务的 due (日历/列表都按内存渲染)
+function applyTaskDueLocal(taskId, due) {
+  const t = allTasks.find(x => x.id === taskId) || completedTasks.find(x => x.id === taskId);
+  if (t) { t.due = due; return true; }
+  return false;
+}
+
+// 后台静默对账 (2026-09-20): 界面已按乐观状态渲染完, 这里才把服务端真值
+// (尤其 sections 分桶) 拉回来 —— 不 await、不参与手感; 拖拽中就推迟, 免得重绘打断手势。
+function calSilentReconcile(attempt = 0) {
+  if (calDrag && calDrag.active) {
+    if (attempt < 25) setTimeout(() => calSilentReconcile(attempt + 1), 400);
+    return;
+  }
+  loadTasks();
+}
+
+function calPutDue(taskId, due) {
+  return fetch(`/todo/api/tasks/${encodeURIComponent(taskId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ due }),
+  });
+}
+
+// 拖拽改期提交: 松手先本地落位(6ms 到位), PUT 走后台; 失败/异常自动还原并提示。
+function calDragCommit(taskId, toDate, fromDate) {
+  applyTaskDueLocal(taskId, toDate);
+  renderCalendar();                        // ← 手感就在这里: 不等网络
+  calTaskChain(taskId, async () => {
+    try {
+      const res = await calPutDue(taskId, toDate);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        applyTaskDueLocal(taskId, fromDate);
+        renderCalendar();
+        showToast('✗ ' + (data.error || '改期失败') + ' · 已还原');
+        return;
+      }
+      showUndoToast(`✓ 已移到 ${toDate}`, () => calUndoDue(taskId, toDate, fromDate));
+    } catch (e) {
+      applyTaskDueLocal(taskId, fromDate);
+      renderCalendar();
+      showToast('✗ 改期失败: ' + e.message + ' · 已还原');
+    } finally {
+      calSilentReconcile();
+    }
+  });
+}
+
+// 撤销: 同样是乐观的 (点击即回位), 后台回滚
+function calUndoDue(taskId, toDate, backDate) {
+  applyTaskDueLocal(taskId, backDate);
+  renderCalendar();
+  calTaskChain(taskId, async () => {
+    try {
+      const res = await calPutDue(taskId, backDate);
+      if (res.ok) {
+        showToast('↺ 已撤销, 回到 ' + backDate);
+      } else {
+        applyTaskDueLocal(taskId, toDate);
+        renderCalendar();
+        showToast('✗ 撤销失败 · 已还原');
+      }
+    } catch (e) {
+      applyTaskDueLocal(taskId, toDate);
+      renderCalendar();
+      showToast('✗ 撤销失败: ' + e.message);
+    } finally {
+      calSilentReconcile();
+    }
+  });
+}
+
+// ── Day Drawer (centered pixel modal showing all tasks for a clicked day) ──
+const WEEKDAY_NAMES_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+let currentDrawerDay = null;  // 当前抽屉对应的 YYYY-MM-DD,供「＋ 添加任务」预填
+
+function openDayDrawer(dayKey) {
+  // dayKey: 'YYYY-MM-DD'
+  currentDrawerDay = dayKey;  // 供「＋ 添加任务」预填日期
+  const overlay = document.getElementById('dayDrawerOverlay');
+  const titleEl = document.getElementById('dayDrawerTitle');
+  const bodyEl = document.getElementById('dayDrawerBody');
+  if (!overlay || !titleEl || !bodyEl) return;
+
+  // 解析日期
+  const [y, m, d] = dayKey.split('-').map(Number);
+  const date = new Date(y, m - 1, d);
+  const weekday = WEEKDAY_NAMES_CN[date.getDay()];
+
+  // 取日历任务集（默认未完成；开启「显示已完成」时含已完成）覆盖该天的任务（跨天 due ≤ day ≤ due_end 也算）
+  const tasks = getCalendarTasks()
+    .filter(t => {
+      if (!t.due) return false;
+      const start = t.due.slice(0, 10);
+      const end = t.due_end && t.due_end.slice(0, 10) > start ? t.due_end.slice(0, 10) : start;
+      return dayKey >= start && dayKey <= end;
+    })
+    .sort((a, b) => {
+      const po = { high: 0, medium: 1, low: 2 };
+      const p = (po[a.priority] ?? 1) - (po[b.priority] ?? 1);
+      if (p !== 0) return p;
+      return (a.due_time || '').localeCompare(b.due_time || '');
+    });
+
+  // 头部: 2026·07·23 周四 · 2 项
+  titleEl.innerHTML = '';
+  const dateSpan = document.createElement('span');
+  dateSpan.textContent = `${dayKey} ${weekday}`;
+  titleEl.appendChild(dateSpan);
+  const countSpan = document.createElement('span');
+  countSpan.className = 'count';
+  countSpan.textContent = `· ${tasks.length} 项`;
+  titleEl.appendChild(countSpan);
+
+  // body: 复用 renderCard 渲染每个任务;空就显示空状态
+  bodyEl.innerHTML = '';
+  if (tasks.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'day-drawer-empty';
+    empty.textContent = '★ 当日没有任务';
+    bodyEl.appendChild(empty);
+  } else {
+    const wrap = document.createElement('div');
+    wrap.className = 'day-drawer-list';
+    for (const task of tasks) {
+      // renderCard 返回 HTML 字符串, 用临时容器转 DOM
+      // 2026-08-18: 已完成任务按状态渲染 (显示✓勾掉, 可点开编辑/恢复)
+      const isDone = task.status === 'done' || task.completed || task.folder === 'done';
+      const tmp = document.createElement('div');
+      tmp.innerHTML = renderCard(task, isDone);
+      const card = tmp.firstElementChild;
+      // 卡片本体(非checkbox)点击 → 开编辑 + 关抽屉 (checkbox 已 stopPropagation)
+      card.addEventListener('click', closeDayDrawer);
+      wrap.appendChild(card);
+    }
+    bodyEl.appendChild(wrap);
+  }
+
+  overlay.classList.add('open');
+}
+
+function closeDayDrawer() {
+  const overlay = document.getElementById('dayDrawerOverlay');
+  if (overlay) overlay.classList.remove('open');
+}
+
+// ── List System (2026-08-18 升级: 购物升级为「列表」, 现加自建列表+归属) ──
+async function loadLists() {
+  try {
+    const res = await fetch('/todo/api/lists');
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '列表加载失败')); return; }
+    listObjects = data.lists || [];
+    // 当前列表不存在/不可见 → 回退到第一个或 shopping
+    if (!listObjects.find(l => l.id === currentListId)) {
+      currentListId = listObjects.length ? listObjects[0].id : 'shopping';
+    }
+    renderListMenu();
+    await loadShopping();
+  } catch (e) { showToast('列表加载失败: ' + e.message); }
+}
+
+function renderListMenu() {
+  const label = document.getElementById('listTriggerLabel');
+  const menu = document.getElementById('listMenu');
+  if (!label || !menu) return;
+  const cur = listObjects.find(l => l.id === currentListId);
+  label.textContent = cur ? cur.name : '列表';
+  menu.replaceChildren();
+  for (const lst of listObjects) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'project-menu-item';
+    btn.setAttribute('role', 'menuitem');
+    btn.setAttribute('aria-current', lst.id === currentListId ? 'true' : 'false');
+    const name = document.createElement('span');
+    name.className = 'project-menu-name';
+    name.textContent = lst.name;
+    const badge = document.createElement('span');
+    badge.className = 'project-menu-count';
+    badge.textContent = lst.owner === 'shared' ? '共享' : lst.owner;
+    btn.append(name, badge);
+    btn.addEventListener('click', () => { selectList(lst.id); });
+    menu.append(btn);
+  }
+  updateListOwnerBadge();
+}
+
+function updateListOwnerBadge() {
+  const el = document.getElementById('shoppingListOwner');
+  const cur = listObjects.find(l => l.id === currentListId);
+  if (el) el.innerHTML = cur ? (cur.owner === 'shared' ? '<span class="y8i y8i-bookmark"></span> 共享' : '· ' + escapeHtml(cur.owner)) : '';
+}
+
+function openListMenu() { document.getElementById('listMenu').classList.add('open'); document.getElementById('listTrigger').setAttribute('aria-expanded','true'); }
+function closeListMenu() { document.getElementById('listMenu').classList.remove('open'); document.getElementById('listTrigger').setAttribute('aria-expanded','false'); }
+
+function selectList(id) {
+  currentListId = id;
+  shoppingCompletedPage = 0;
+  localStorage.setItem('todoCurrentList', id);   // localStorage 持久化, 地址栏干净 (2026-08-24)
+  closeListMenu();
+  syncViewUrl('replace');   // 重写 URL (不含 list 参数), 地址栏干净
+  renderListMenu();
+  loadShopping();
+}
+
+// 列表选择不再独立维护 URL —— 已并入 syncViewUrl 的 list 参数 (2026-08-20)
+
+async function createNewList() {
+  const name = (prompt('新列表名称') || '').trim();
+  if (!name) return;
+  // 归属选择（共享/自己）——用二次 prompt 输入不友好，默认共享，后续可点「归属」切换
+  try {
+    const res = await fetch('/todo/api/lists', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name, owner: 'shared' }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '创建失败')); return; }
+    showToast('✓ 已创建列表');
+    currentListId = data.id;
+    localStorage.setItem('todoCurrentList', currentListId);
+    await loadLists();
+    renderListMenu();
+    loadShopping();
+  } catch (e) { showToast('创建失败: ' + e.message); }
+}
+
+async function toggleCurrentListOwner() {
+  const cur = listObjects.find(l => l.id === currentListId);
+  if (!cur) return;
+  // O3-P1: 归属切换与当前身份无关 — 'self' 由后端解析为当前用户。
+  // 旧实现 shared→(currentUser === 'bob' ? 'bob' : 'alice'): 对任何非
+  // 'bob' 用户都会提交错误 owner, 被后端 403 拒绝 (公开部署下功能损坏)。
+  const newOwner = cur.owner === 'shared' ? 'self' : 'shared';
+  try {
+    const res = await fetch(`/todo/api/lists/${encodeURIComponent(currentListId)}`, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ owner: newOwner }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '改归属失败')); return; }
+    showToast(cur.owner === 'shared' ? '切为私有' : '切为共享');
+    await loadLists();
+  } catch (e) { showToast('改归属失败: ' + e.message); }
+}
+
+async function deleteCurrentList() {
+  if (currentListId === 'shopping') { showToast('预置购物列表不能删除'); return; }
+  if (!confirm('删除该列表及其全部条目？')) return;
+  try {
+    const res = await fetch(`/todo/api/lists/${encodeURIComponent(currentListId)}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '删除失败')); return; }
+    showToast('已删除列表');
+    currentListId = 'shopping';
+    localStorage.setItem('todoCurrentList', 'shopping');
+    await loadLists();
+    loadShopping();
+  } catch (e) { showToast('删除失败: ' + e.message); }
+}
+
+async function loadShopping() {
+  try {
+    const res = await fetch(`/todo/api/lists/${encodeURIComponent(currentListId)}/items`);
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '列表加载失败')); return; }
+    shoppingItems = data.items || [];
+    shoppingCompletedPage = 0;
+    if (currentView === 'shopping') renderShopping();
+  } catch (e) { showToast('列表加载失败: ' + e.message); }
+}
+
+function renderShopping() {
+  const container = document.getElementById('shoppingList');
+  if (!container) return;
+  const todos = shoppingItems.filter(i => i.status !== 'done');
+  const dones = shoppingItems.filter(i => i.status === 'done');
+  const completedPageCount = Math.max(1, Math.ceil(dones.length / SHOPPING_COMPLETED_PAGE_SIZE));
+  shoppingCompletedPage = Math.min(shoppingCompletedPage, completedPageCount - 1);
+  const completedStart = shoppingCompletedPage * SHOPPING_COMPLETED_PAGE_SIZE;
+  const visibleDones = dones.slice(completedStart, completedStart + SHOPPING_COMPLETED_PAGE_SIZE);
+  const clearRow = document.getElementById('shoppingClearRow');
+  if (clearRow) clearRow.hidden = dones.length === 0;
+
+  let html = '';
+  if (shoppingItems.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = '☐ 列表是空的，加点什么吧';
+    container.replaceChildren(empty);
+    return;
+  }
+
+  if (todos.length > 0) {
+    html += `<div class="section"><div class="section-header">☐ 未完成 <span class="badge">${todos.length}</span></div><div class="divider"></div>`;
+    for (const item of todos) html += renderShoppingItem(item);
+    html += `</div>`;
+  }
+  if (dones.length > 0) {
+    const prevDisabled = shoppingCompletedPage === 0 ? ' disabled' : '';
+    const nextDisabled = shoppingCompletedPage >= completedPageCount - 1 ? ' disabled' : '';
+    html += `<div class="section"><div class="section-header"><span class="y8i y8i-check"></span> 已完成 <span class="badge">${dones.length}</span><div class="shopping-completed-controls"><button type="button" class="btn shopping-completed-nav y8y-btn" onclick="changeShoppingCompletedPage(-1)"${prevDisabled}>◀ 上10条</button><span class="shopping-completed-page">${shoppingCompletedPage + 1} / ${completedPageCount} 页</span><button type="button" class="btn shopping-completed-nav y8y-btn" onclick="changeShoppingCompletedPage(1)"${nextDisabled}>下10条 ▶</button></div></div><div class="divider"></div>`;
+    for (const item of visibleDones) html += renderShoppingItem(item, true);
+    html += `</div>`;
+  }
+  container.innerHTML = html;
+}
+
+function changeShoppingCompletedPage(delta) {
+  const doneCount = shoppingItems.filter(i => i.status === 'done').length;
+  const pageCount = Math.max(1, Math.ceil(doneCount / SHOPPING_COMPLETED_PAGE_SIZE));
+  shoppingCompletedPage = Math.max(0, Math.min(pageCount - 1, shoppingCompletedPage + delta));
+  renderShopping();
+}
+
+function renderShoppingItem(item, isDone = false) {
+  const id = encodeURIComponent(item.id);
+  const title = escapeHtml(item.title);
+  const doneCls = isDone ? ' shopping-item-done' : '';
+  return `<div class="shopping-item${doneCls}">
+    <span class="shopping-name"${isDone ? '' : ` onclick="editShoppingItem('${id}')"`} title="${isDone ? '' : '点击编辑'}">${title}</span>
+    <button type="button" class="shopping-check" onclick="toggleShoppingItem('${id}', ${isDone ? 'false' : 'true'})"
+      aria-label="${isDone ? '恢复为待购' : '标记已购'}" aria-pressed="${isDone ? 'true' : 'false'}" title="toggle">${isDone ? '<span class="y8i y8i-check"></span>' : ''}</button>
+    <button type="button" class="shopping-copy" onclick="copyShoppingItem('${id}')" aria-label="复制全文" title="复制全文"><span class="y8i y8i-copy"></span></button>
+    <button type="button" class="shopping-edit" onclick="editShoppingItem('${id}')" aria-label="编辑此条目" title="编辑"><span class="y8i y8i-edit"></span></button>
+    <button type="button" class="shopping-del" onclick="deleteShoppingItem('${id}')" aria-label="删除此条目" title="删除"><span class="y8i y8i-trash"></span></button>
+  </div>`;
+}
+
+// ── 列表条目编辑 (2026-08-20) ──
+let _shopEditId = null;
+function editShoppingItem(encodedId) {
+  const id = decodeURIComponent(encodedId);
+  const item = shoppingItems.find(i => i.id === id);
+  if (!item) return;
+  _shopEditId = id;
+  document.getElementById('shopEditInput').value = item.title;
+  document.getElementById('shopEditOverlay').hidden = false;
+  document.getElementById('shopEditOverlay').classList.add('open');
+  document.getElementById('shopEditInput').focus();
+}
+function closeShopEdit() {
+  _shopEditId = null;
+  document.getElementById('shopEditOverlay').classList.remove('open');
+  document.getElementById('shopEditOverlay').hidden = true;
+}
+async function saveShopEdit() {
+  const newTitle = document.getElementById('shopEditInput').value;
+  if (!_shopEditId) { closeShopEdit(); return; }
+  if (!newTitle.trim()) { showToast('内容不能为空'); return; }
+  const id = _shopEditId;
+  closeShopEdit();
+  try {
+    const res = await fetch(`/todo/api/lists/${encodeURIComponent(currentListId)}/items/${encodeURIComponent(id)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: newTitle }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '保存失败')); }
+    else showToast('✓ 已保存');
+    loadShopping();
+  } catch (e) { showToast('保存失败: ' + e.message); }
+}
+
+// 一键复制条目全文到剪贴板 (2026-08-20) — 从 shoppingItems 取原始 title, 避免 escapeHtml 转义污染
+function copyShoppingItem(encodedId) {
+  const id = decodeURIComponent(encodedId);
+  const item = shoppingItems.find(i => i.id === id);
+  const text = item ? item.title : '';
+  const done = () => { showToast('✓ 已复制'); };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+}
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) { showToast('复制失败: ' + e.message); }
+  document.body.removeChild(ta);
+}
+
+async function addShoppingItem() {
+  const input = document.getElementById('shoppingInput');
+  const title = (input.value || '').trim();
+  if (!title) { showToast('请输入条目名'); return; }
+  try {
+    const res = await fetch(`/todo/api/lists/${encodeURIComponent(currentListId)}/items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '添加失败')); return; }
+    input.value = '';
+    input.focus();
+    showToast(data.duplicate ? '已在清单中' : '✓ 已添加');
+    loadShopping();
+  } catch (e) { showToast('添加失败: ' + e.message); }
+}
+
+async function toggleShoppingItem(encodedId, toDone) {
+  const id = decodeURIComponent(encodedId);
+  try {
+    const res = await fetch(`/todo/api/lists/${encodeURIComponent(currentListId)}/items/${encodedId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: toDone ? 'done' : 'todo' }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '操作失败')); return; }
+    loadShopping();
+  } catch (e) { showToast('操作失败: ' + e.message); }
+}
+
+async function deleteShoppingItem(encodedId) {
+  try {
+    const res = await fetch(`/todo/api/lists/${encodeURIComponent(currentListId)}/items/${encodedId}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '删除失败')); return; }
+    showToast('已删除');
+    loadShopping();
+  } catch (e) { showToast('删除失败: ' + e.message); }
+}
+
+async function clearShoppingDone() {
+  const dones = shoppingItems.filter(i => i.status === 'done');
+  if (dones.length === 0) return;
+  if (!confirm(`清空 ${dones.length} 个已完成条目？`)) return;
+  for (const item of dones) {
+    try {
+      await fetch(`/todo/api/lists/${encodeURIComponent(currentListId)}/items/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+    } catch (e) { /* 单项失败继续清其他 */ }
+  }
+  showToast('✓ 已完成已清空');
+  loadShopping();
+}
+
+// Modal functions
+const VALID_COLORS_JS = ['yellow', 'green', 'pink', 'purple', 'orange', 'red', 'blue', 'cyan'];
+let selectedColor = 'green';
+let userTouchedColor = false;   // 新建时用户是否手动点过色块 → 手动选过就尊重用户, 不联动项目色 (2026-08-23)
+function setColorPicker(color) {
+  selectedColor = VALID_COLORS_JS.includes(color) ? color : 'green';
+  document.querySelectorAll('#inputColor .color-swatch').forEach(sw => {
+    sw.classList.toggle('active', sw.dataset.color === selectedColor);
+    sw.setAttribute('aria-checked', sw.dataset.color === selectedColor ? 'true' : 'false');
+  });
+}
+function getSelectedColor() { return selectedColor; }
+// 取某项目已有任务的颜色 (多数票; todo 优先, 回退 completion) —— 供「新建选已有项目→自动继承项目色」联动 (2026-08-23)
+function getProjectColor(project) {
+  if (!project) return null;
+  const tally = (arr) => {
+    const v = {};
+    let best = null, bestN = 0;
+    for (const t of arr) {
+      if (t.project !== project) continue;
+      const c = t.color && VALID_COLORS_JS.includes(t.color) ? t.color : 'green';
+      v[c] = (v[c] || 0) + 1;
+      if (v[c] > bestN) { best = c; bestN = v[c]; }
+    }
+    return best;
+  };
+  const todoColor = tally(allTasks.filter(t => t.status === 'todo'));
+  return todoColor || tally(allTasks) || tally(completedTasks) || null;
+}
+// 新建任务时: 若项目框填了已有项目且用户没手动改色 → 把色块联动成该项目颜色
+function syncProjectColor() {
+  if (editingId || userTouchedColor) return;   // 编辑不联动; 手动选过色尊重用户
+  const proj = document.getElementById('inputProject').value.trim();
+  const pc = getProjectColor(proj);
+  if (pc) setColorPicker(pc);
+}
+// 色块点击选择 (事件绑定在 init 区)
+function openModal(title, task, options = {}) {
+  editingId = task ? task.id : null;
+  creatingProject = Boolean(options.creatingProject);
+  userTouchedColor = false;   // 每次打开重置手动改色标记 (2026-08-23)
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('inputTitle').value = task ? task.title : '';
+  document.getElementById('inputDue').value = task && task.due ? task.due : (options.due || ymd(new Date()));
+  document.getElementById('inputDueEnd').value = task && task.due_end ? task.due_end : '';
+  document.getElementById('inputDueTime').value = task && task.due_time ? task.due_time : '';
+  setColorPicker(task ? (task.color || 'green') : (localStorage.getItem('todoColorDefault') || 'green'));
+  const ownerSel = document.getElementById('inputOwner');
+  if (ownerSel) {
+    // 新建任务: 用持久化的上次选择 (localStorage); 编辑: 用任务自己的归属
+    if (task) {
+      // 编辑: 用任务自己的归属
+      ownerSel.value = task.owner === 'shared' ? 'shared' : 'me';
+    } else {
+      let lastOwner = 'me';
+      try { lastOwner = localStorage.getItem('todoOwnerDefault') || 'me'; } catch(e) {}
+      ownerSel.value = lastOwner === 'shared' ? 'shared' : 'me';
+    }
+  }
+  document.getElementById('inputContent').value = task && task.body && task.body !== task.title ? task.body : '';
+  // 内容预览/编辑模式 (2026-08-13 方案A): 编辑已有任务默认预览渲染; 新建默认编辑
+  setContentMode(task ? 'preview' : 'edit');
+  // 新建任务: 恢复上次未保存的草稿 (2026-08-11 自动保存)
+  if (!task) {
+    try {
+      const draft = localStorage.getItem(DRAFT_KEY);
+      if (draft && !document.getElementById('inputContent').value) {
+        document.getElementById('inputContent').value = draft;
+        showToast('已恢复未保存的草稿', 2500);
+      }
+    } catch (e) {}
+  }
+  const activeProject = currentProject !== PROJECT_ALL && currentProject !== PROJECT_NONE ? currentProject : '';
+  document.getElementById('inputProject').value = task ? (task.project || '') : (options.project ?? activeProject);
+  // 新建任务: 预填项目已有色 → 立即联动色块 (2026-08-23)
+  if (!task) syncProjectColor();
+
+  const actions = document.getElementById('modalActions');
+  if (editingId) {
+    actions.innerHTML = `
+      <button class="btn btn-danger y8y-btn y8y-btn-danger" onclick="deleteTask()">删除</button>
+      <button class="btn btn-cancel y8y-btn y8y-btn-ghost" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary y8y-btn y8y-btn-primary" onclick="saveTask()">保存</button>
+    `;
+  } else {
+    actions.innerHTML = `
+      <button class="btn btn-cancel y8y-btn y8y-btn-ghost" onclick="closeModal()">取消</button>
+      <button class="btn btn-primary y8y-btn y8y-btn-primary" onclick="saveTask()">保存</button>
+    `;
+  }
+
+  document.getElementById('modalOverlay').classList.add('open');
+  document.body.classList.add('modal-locked');   // 2026-08-18: 锁定背景滚动, 防穿透
+  // 只有新建任务才自动聚焦（手机上弹键盘）；编辑已有任务不聚焦，默认纯查看 (2026-08-17)
+  if (!task) {
+    const focusId = options.focusId || 'inputTitle';
+    setTimeout(() => document.getElementById(focusId).focus(), 350);
+  }
+}
+
+function openNewProjectModal() {
+  closeProjectMenu();
+  openModal('新 建 项 目 任 务', null, { project: '', focusId: 'inputProject', creatingProject: true });
+}
+
+function closeModal() {
+  clearTimeout(autoSaveTimer);
+  document.getElementById('modalOverlay').classList.remove('open');
+  document.body.classList.remove('modal-locked');   // 2026-08-18: 弹窗关闭恢复滚动
+  editingId = null;
+  creatingProject = false;
+}
+
+function openEdit(encodedId) {
+  const id = decodeURIComponent(encodedId);
+  // 同时查未完成和已完成 (2026-08-18: 日历可编辑已完成任务)
+  const task = allTasks.find(t => t.id === id) || completedTasks.find(t => t.id === id);
+  if (task) openModal('编 辑 任 务', task);
+}
+
+// 自动保存: 输入内容时防抖 3s (2026-08-11)
+document.getElementById('inputContent').addEventListener('input', scheduleAutoSave);
+
+async function saveTask() {
+  const title = document.getElementById('inputTitle').value.trim();
+  if (!title) { showToast('请输入标题'); return; }
+
+  const due = document.getElementById('inputDue').value;
+  const due_end = document.getElementById('inputDueEnd').value;
+  // 结束日期必须 ≥ 截止日期，否则提示
+  if (due && due_end && due_end < due) {
+    showToast('结束日期不能早于截止日期');
+    return;
+  }
+  const due_time = document.getElementById('inputDueTime').value;
+  const color = getSelectedColor();
+  // 持久化颜色选择: 下次新建默认用上次选的 (2026-08-11)
+  try {
+    localStorage.setItem('todoColorDefault', color || 'green');
+  } catch(e) {}
+  const ownerSel = document.getElementById('inputOwner');
+  // 归属两态: shared / me→'self' (后端解析为当前用户; O3-P1 起同样接受字面身份)
+  const owner = ownerSel && ownerSel.value === 'shared' ? 'shared' : 'self';
+  // 持久化归属选择: 下次新建任务默认用上次的选择
+  try {
+    localStorage.setItem('todoOwnerDefault', owner === 'shared' ? 'shared' : 'me');
+  } catch(e) {}
+  const content = document.getElementById('inputContent').value.trim() || title;
+  const project = document.getElementById('inputProject').value.trim();
+  if (creatingProject && !project) { showToast('请输入项目名'); return; }
+  // 2026-08-11 定稿: 项目名不限制字符 (允许中文/空格), URL 由 URLSearchParams 自动编码
+  const newProjectScope = creatingProject ? project : null;
+
+  try {
+    if (editingId) {
+      const res = await fetch(`/todo/api/tasks/${encodeURIComponent(editingId)}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ title, due, due_end, due_time, color, owner, content, project }),
+      });
+      if (res.ok) {
+        showToast('✓ 已更新');
+        closeModal();
+        loadTasks();
+      } else {
+        const data = await res.json();
+        showToast('✗ ' + (data.error || '更新失败'));
+      }
+    } else {
+      const res = await fetch('/todo/api/tasks', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ title, due, due_end, due_time, color, owner, content, project }),
+      });
+      if (res.ok) {
+        showToast('✓ 已新建');
+        try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
+        closeModal();
+        if (newProjectScope) {
+          currentProject = newProjectScope;
+          currentTimeFilter = 'all';
+          syncViewUrl('push');
+        }
+        loadTasks();
+      } else {
+        const data = await res.json();
+        showToast('✗ ' + (data.error || '创建失败'));
+      }
+    }
+  } catch (e) {
+    showToast('✗ ' + e.message);
+  }
+}
+
+async function deleteTask() {
+  if (!editingId) return;
+  if (!confirm('确定删除这个任务吗？')) return;
+
+  try {
+    const res = await fetch(`/todo/api/tasks/${encodeURIComponent(editingId)}`, { method: 'DELETE' });
+    if (res.ok) {
+      showToast('✗ 已删除');
+      closeModal();
+      loadTasks();
+    }
+  } catch (e) {
+    showToast('✗ ' + e.message);
+  }
+}
+
+// Toast
+//
+// Fusion Pixel 没有 ✓(U+2713) / ✗(U+2717) —— 这两个字符会回落到系统字体，
+// 在像素界面里格外扎眼（实测确认：其余字符全部由像素字体渲染）。
+// 这里把**行首**的完成/失败标记换成项目自带的像素图标，其余文本仍走
+// textContent（绝不改用 innerHTML —— 错误信息里可能带用户输入，不能开 XSS 口子）。
+const TOAST_MARK_ICON = { '✓': 'y8i-check', '☑': 'y8i-check', '✗': 'y8i-close' };
+function renderToastText(el, msg) {
+  el.textContent = '';
+  const m = /^\s*([✓☑✗])\s*/.exec(msg);
+  if (m && TOAST_MARK_ICON[m[1]]) {
+    const icon = document.createElement('span');
+    icon.className = 'y8i ' + TOAST_MARK_ICON[m[1]];
+    icon.style.setProperty('--y8i-size', 'var(--y8i-14)');
+    el.appendChild(icon);
+    el.appendChild(document.createTextNode(msg.slice(m[0].length)));
+  } else {
+    el.textContent = msg;
+  }
+}
+function showToast(msg, duration = 2000) {
+  const el = document.getElementById('toast');
+  renderToastText(el, msg);
+  // 清掉上一次可能残留的「撤销」态 (2026-09-16)
+  el.onclick = null;
+  el.style.pointerEvents = '';
+  el.style.cursor = '';
+  el.classList.add('show');
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => el.classList.remove('show'), duration);
+}
+
+// 带撤销的提示 (2026-09-16): 点 toast 本体即撤销; 默认 5s 后失效
+function showUndoToast(msg, undoFn, duration = 5000) {
+  const el = document.getElementById('toast');
+  renderToastText(el, msg + '  ↺ 点此撤销');
+  el.style.pointerEvents = 'auto';    // .toast 默认 pointer-events:none, 这里要可点
+  el.style.cursor = 'pointer';
+  el.classList.add('show');
+  clearTimeout(el._timer);
+  const cleanup = () => {
+    el.classList.remove('show');
+    el.onclick = null;
+    el.style.pointerEvents = '';
+    el.style.cursor = '';
+  };
+  el.onclick = async () => { cleanup(); await undoFn(); };
+  el._timer = setTimeout(cleanup, duration);
+}
+
+// ── 自动保存 (2026-08-11): 输入内容防抖 3s 自动保存, 防长段丢失 ──
+let autoSaveTimer = null;
+const DRAFT_KEY = 'todoDraftContent';
+
+// ── 内容预览/编辑双模式 (2026-08-13 方案A) ──
+let contentMode = 'edit';   // 'preview' | 'edit'
+
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderInlineMd(s) {
+  let out = escapeHtml(s);
+  // **bold** → <strong>
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // `code` → <code>
+  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+  return out;
+}
+
+function renderMarkdown(text) {
+  if (!text || !text.trim()) return '<div class="md-empty">（无内容）</div>';
+  const lines = text.split('\n');
+  let html = '';
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    // checkbox: - [ ] / - [x]
+    let m = trimmed.match(/^[-*]\s*\[([ xX])\]\s*(.*)$/);
+    if (m) {
+      const checked = m[1].toLowerCase() === 'x';
+      html += `<label class="md-cb${checked ? ' done' : ''}" data-line="${i}">` +
+        `<input type="checkbox"${checked ? ' checked' : ''}>` +
+        `<span>${renderInlineMd(m[2]) || '&nbsp;'}</span></label>`;
+      continue;
+    }
+    // 标题
+    m = trimmed.match(/^(#{1,3})\s+(.*)$/);
+    if (m) {
+      const lv = m[1].length;
+      html += `<div class="md-h${lv}">${renderInlineMd(m[2])}</div>`;
+      continue;
+    }
+    // 无序列表
+    m = trimmed.match(/^[-*]\s+(.*)$/);
+    if (m) { html += `<div class="md-li">${renderInlineMd(m[1])}</div>`; continue; }
+    // 空行 → 间距
+    if (!trimmed) { html += '<div class="md-space"></div>'; continue; }
+    // 普通段落
+    html += `<div class="md-p">${renderInlineMd(trimmed)}</div>`;
+  }
+  return html;
+}
+
+function setContentMode(mode) {
+  contentMode = mode;
+  const preview = document.getElementById('contentPreview');
+  const ta = document.getElementById('inputContent');
+  const btn = document.getElementById('contentModeBtn');
+  if (mode === 'preview') {
+    preview.innerHTML = renderMarkdown(ta.value);
+    preview.hidden = false;
+    ta.hidden = true;
+    // 图标用项目自带的像素 SVG（✏️/👁 是 emoji，Fusion Pixel 里没有，
+    // 会回落到系统彩色字体）—— 与全站图标同一套 .y8i mask 机制。
+    btn.innerHTML = '<span class="y8i y8i-edit"></span> 编辑';
+  } else {
+    preview.hidden = true;
+    ta.hidden = false;
+    btn.innerHTML = '<span class="y8i y8i-eye"></span> 预览';
+    setTimeout(() => ta.focus(), 50);
+  }
+}
+
+function toggleContentMode() {
+  setContentMode(contentMode === 'preview' ? 'edit' : 'preview');
+}
+
+// checkbox 点击 → 翻转源 markdown 行 → 重新渲染 → 自动保存
+document.getElementById('contentPreview').addEventListener('change', (e) => {
+  if (!e.target.matches('input[type="checkbox"]')) return;
+  const label = e.target.closest('.md-cb');
+  if (!label) return;
+  const lineIdx = parseInt(label.dataset.line, 10);
+  const ta = document.getElementById('inputContent');
+  const lines = ta.value.split('\n');
+  if (lineIdx < 0 || lineIdx >= lines.length) return;
+  const checked = e.target.checked;
+  lines[lineIdx] = lines[lineIdx].replace(/^(\s*[-*])\s*\[[ xX]\]/, `$1 [${checked ? 'x' : ' '}]`);
+  ta.value = lines.join('\n');
+  // 更新预览 + 触发自动保存 (PUT content)
+  setContentMode('preview');
+  if (editingId) {
+    clearTimeout(autoSaveTimer);
+    autoSaveContent();
+  }
+});
+
+function scheduleAutoSave() {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(autoSaveContent, 3000);
+}
+
+async function autoSaveContent() {
+  const content = document.getElementById('inputContent').value;
+  if (editingId) {
+    // 编辑已有任务 → PUT content 到后端 (只存内容字段, 不触发标题改名)
+    try {
+      const res = await fetch(`/todo/api/tasks/${encodeURIComponent(editingId)}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ content }),
+      });
+      if (res.ok) showToast('✓ 已自动保存', 1200);
+      else showToast('✗ 自动保存失败', 2000);
+    } catch (e) {
+      showToast('✗ 自动保存失败', 2000);
+    }
+  } else {
+    // 新建任务 → 存 localStorage 草稿 (防关页面丢失)
+    try {
+      localStorage.setItem(DRAFT_KEY, content);
+    } catch (e) {}
+  }
+}
+
+// Time filter dropdown (和项目同款)
+document.getElementById('timeTrigger').addEventListener('click', () => {
+  const isOpen = document.getElementById('timeMenu').classList.contains('open');
+  if (isOpen) closeTimeMenu();
+  else openTimeMenu();
+});
+document.addEventListener('click', (event) => {
+  if (!document.getElementById('timeSwitcher').contains(event.target)) closeTimeMenu();
+});
+
+// Project scope switcher
+document.getElementById('projectTrigger').addEventListener('click', () => {
+  const isOpen = document.getElementById('projectMenu').classList.contains('open');
+  if (isOpen) closeProjectMenu();
+  else openProjectMenu();
+});
+document.addEventListener('click', (event) => {
+  if (!document.getElementById('projectSwitcher').contains(event.target)) closeProjectMenu();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') { closeProjectMenu(); closeTimeMenu(); }
+});
+window.addEventListener('popstate', () => {
+  readViewStateFromUrl();
+  closeProjectMenu();
+  closeTimeMenu();
+  renderProjectMenu();
+  renderTimeMenu();
+  updateOwnerControls();
+  render();
+});
+
+// Owner scope toggles (我 / 共享 — 最少亮一个)
+document.getElementById('ownerToggleMine').addEventListener('click', () => toggleOwnerScope('mine'));
+document.getElementById('ownerToggleShared').addEventListener('click', () => toggleOwnerScope('shared'));
+// 颜色色块选择 (2026-08-11: 自选颜色替代优先级)
+document.querySelectorAll('#inputColor .color-swatch').forEach(sw => {
+  sw.addEventListener('click', () => { userTouchedColor = true; setColorPicker(sw.dataset.color); });
+});
+
+// 新建任务: 项目框输入/下拉选已有项目 → 自动联动该项目颜色 (2026-08-23, 联动逻辑见 syncProjectColor)
+document.getElementById('inputProject').addEventListener('input', syncProjectColor);
+
+// FAB
+document.getElementById('fabAdd').addEventListener('click', () => {
+  openModal('新 建 任 务', null);
+});
+
+// 2026-08-20: 取消「点击外侧(overlay)关闭」—— 编辑弹窗里框选文字时, 鼠标拖出弹窗外松手会误判成点击外侧而关掉,
+// 用户只是要框选文字, 不该被判定回主页。改为必须点「取消」按钮才退出。
+// document.getElementById('modalOverlay').addEventListener('click', (e) => {
+//   if (e.target === document.getElementById('modalOverlay')) closeModal();
+// });
+
+// ── Settings modal (我/共享 归属 + 主题) ──
+function openSettings() {
+  updateOwnerControls();
+  updateThemeControls();
+  updateCalTodoOnlyControls();
+  renderPersistentProjects();
+  document.getElementById('settingsOverlay').classList.add('open');
+}
+function closeSettings() {
+  document.getElementById('settingsOverlay').classList.remove('open');
+}
+document.getElementById('settingsBtn').addEventListener('click', openSettings);
+document.getElementById('settingsOverlay').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('settingsOverlay')) closeSettings();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && document.getElementById('settingsOverlay').classList.contains('open')) {
+    closeSettings();
+  }
+});
+
+// ── 持久项目 (2026-08-12: localStorage → 后端 /todo/api/persistent-projects, 跨设备同步) ──
+let persistentProjectsCache = [];
+
+function getPersistentProjects() {
+  return persistentProjectsCache;
+}
+
+async function loadPersistentProjects() {
+  try {
+    const res = await fetch('/todo/api/persistent-projects');
+    if (!res.ok) return;
+    const data = await res.json();
+    persistentProjectsCache = Array.isArray(data.projects) ? data.projects.filter(Boolean) : [];
+    renderPersistentProjects();
+    refreshProjectDatalist();
+    renderProjectMenu();
+  } catch (e) { /* 静默: 离线时用空列表 */ }
+}
+
+async function pushPersistentProjects() {
+  try {
+    await fetch('/todo/api/persistent-projects', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projects: persistentProjectsCache }),
+    });
+  } catch (e) { showToast('✗ 持久项目保存失败', 2000); }
+}
+
+function addPersistentProject(name) {
+  const v = name.trim();
+  if (!v) return;
+  if (!persistentProjectsCache.includes(v)) {
+    persistentProjectsCache.push(v);
+    pushPersistentProjects();
+    renderPersistentProjects();
+    refreshProjectDatalist();
+    renderProjectMenu();
+    showToast('✓ 已设为持久项目');
+  }
+}
+function removePersistentProject(name) {
+  persistentProjectsCache = persistentProjectsCache.filter(p => p !== name);
+  pushPersistentProjects();
+  renderPersistentProjects();
+  refreshProjectDatalist();
+  renderProjectMenu();
+  showToast('已移除持久项目');
+}
+function renderPersistentProjects() {
+  const list = getPersistentProjects();
+  const container = document.getElementById('persistentProjectList');
+  container.replaceChildren();
+  if (!list.length) {
+    const empty = document.createElement('p');
+    empty.className = 'settings-hint';
+    empty.textContent = '（暂无持久项目）';
+    container.appendChild(empty);
+    return;
+  }
+  for (const name of list) {
+    const row = document.createElement('div');
+    row.className = 'persistent-project-item';
+    const label = document.createElement('span');
+    label.className = 'persistent-project-name';
+    label.innerHTML = '<span class="y8i y8i-bookmark"></span> ' + escapeHtml(name);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn btn-cancel persistent-project-remove';
+    remove.textContent = '移除';
+    remove.addEventListener('click', () => removePersistentProject(name));
+    row.append(label, remove);
+    container.appendChild(row);
+  }
+  // datalist 候选项 = 所有已知项目（含完成的），方便输入
+  const dl = document.getElementById('persistentProjectOptions');
+  dl.innerHTML = '';
+  const known = new Set([...allTasks, ...completedTasks].map(t => t.project).filter(Boolean));
+  for (const name of known) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    dl.appendChild(opt);
+  }
+}
+document.getElementById('persistentProjectAdd').addEventListener('click', () => {
+  addPersistentProject(document.getElementById('persistentProjectInput').value);
+  document.getElementById('persistentProjectInput').value = '';
+});
+document.getElementById('persistentProjectInput').addEventListener('keydown', (e) => {
+  if (e.isComposing || e.keyCode === 229) return; // IME 组词回车=确认候选词,不提交
+  if (e.key === 'Enter') {
+    addPersistentProject(document.getElementById('persistentProjectInput').value);
+    document.getElementById('persistentProjectInput').value = '';
+  }
+});
+
+// ── Theme (y8y §12: data-theme attribute + y8y-theme-changed event) ──
+function applyTheme(mode) {
+  if (window.darklight) { darklight.set(mode); return; }
+  document.documentElement.setAttribute('data-theme', mode === 'dark' ? 'dark' : 'light');
+  document.dispatchEvent(new CustomEvent('y8y-theme-changed', { detail: { mode } }));
+}
+
+function updateThemeControls() {
+  if (window.darklight) darklight.repaint();
+}
+
+// ── 日历 view 仅显示未完成 开关 (2026-08-18) ──
+function updateCalTodoOnlyControls() {
+  const btn = document.getElementById('calTodoOnlyBtn');
+  if (!btn) return;
+  btn.classList.toggle('active', calTodoOnly);
+  btn.setAttribute('aria-pressed', calTodoOnly ? 'true' : 'false');
+  btn.innerHTML = '<span class="y8i y8i-check"></span> 仅显示未完成';
+}
+function toggleCalTodoOnly() {
+  calTodoOnly = !calTodoOnly;
+  try { localStorage.setItem('todoCalTodoOnly', calTodoOnly ? '1' : '0'); } catch(e) {}
+  updateCalTodoOnlyControls();
+  if (currentView === 'calendar') renderCalendar();
+}
+
+// ── 中国节假日显示开关 (O3-P1: 可配置, 不与任何用户名绑定) ──
+function updateCnHolidayControls() {
+  const btn = document.getElementById('cnHolidayBtn');
+  if (!btn) return;
+  btn.classList.toggle('active', cnHolidaysEnabled);
+  btn.setAttribute('aria-pressed', cnHolidaysEnabled ? 'true' : 'false');
+}
+function toggleCnHolidays() {
+  cnHolidaysEnabled = !cnHolidaysEnabled;
+  try { localStorage.setItem(cnHolidaysKey(), cnHolidaysEnabled ? '1' : '0'); } catch(e) {}
+  updateCnHolidayControls();
+  if (currentView === 'calendar') renderCalendar();
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const cBtn = document.getElementById('calTodoOnlyBtn');
+  if (cBtn) cBtn.addEventListener('click', toggleCalTodoOnly);
+  const hBtn = document.getElementById('cnHolidayBtn');
+  if (hBtn) hBtn.addEventListener('click', toggleCnHolidays);
+  updateCnHolidayControls();
+});
+
+function initTheme() {
+  if (window.darklight) { darklight.prePaint(); return; }
+  let mode = null;
+  try { mode = localStorage.getItem('y8y-theme-mode'); } catch(e) {}
+  if (mode !== 'light' && mode !== 'dark') {
+    mode = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  document.documentElement.setAttribute('data-theme', mode);
+}
+initTheme();
+
+/* 2026-09-22: 刷新按钮的数据级刷新（只重拉数据、不重载页面）。
+   共享按钮 .y8y-refresh-btn 的点击由 /assets/ui.js 绑定到这里。 */
+window.y8yRefresh = async function () {
+  var jobs = [];
+  if (typeof loadTasks === 'function') jobs.push(loadTasks());
+  if (typeof loadLists === 'function') jobs.push(loadLists());
+  if (typeof loadPersistentProjects === 'function') jobs.push(loadPersistentProjects());
+  if (typeof loadShopping === 'function') jobs.push(loadShopping());
+  await Promise.all(jobs);
+};
+
+// View tabs (list / calendar / shopping)
+document.getElementById('viewTabList').addEventListener('click', () => setView('list'));
+document.getElementById('viewTabCalendar').addEventListener('click', () => setView('calendar'));
+document.getElementById('viewTabShopping').addEventListener('click', () => setView('shopping'));
+
+// Shopping / 列表系统 interactions (2026-08-18)
+document.getElementById('shoppingAdd').addEventListener('click', addShoppingItem);
+document.getElementById('shoppingInput').addEventListener('keydown', (e) => {
+  // IME 组合状态(中文拼音/日文假名等)按 Enter 是确认候选词,不是提交——直接返回交给输入法
+  if (e.isComposing || e.keyCode === 229) return;
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); addShoppingItem(); }
+});
+document.getElementById('shoppingClearDone').addEventListener('click', clearShoppingDone);
+// 列表系统: 切换/新建/归属/删除
+document.getElementById('listTrigger').addEventListener('click', () => {
+  const menu = document.getElementById('listMenu');
+  if (menu.classList.contains('open')) closeListMenu(); else openListMenu();
+});
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('listMenu');
+  if (menu && menu.classList.contains('open') && !document.getElementById('listSwitcher').contains(e.target)) closeListMenu();
+});
+document.getElementById('listNewBtn').addEventListener('click', createNewList);
+document.getElementById('listOwnerBtn').addEventListener('click', toggleCurrentListOwner);
+document.getElementById('listDeleteBtn').addEventListener('click', deleteCurrentList);
+
+// Calendar navigation
+document.getElementById('calPrev').addEventListener('click', () => changeCalendarMonth(-1));
+document.getElementById('calNext').addEventListener('click', () => changeCalendarMonth(1));
+document.getElementById('calToday').addEventListener('click', () => gotoCalendarToday());
+
+// Day drawer
+document.getElementById('dayDrawerClose').addEventListener('click', closeDayDrawer);
+// day drawer「＋ 添加任务」→ 关抽屉 + 打开新建任务弹窗,日期预填为抽屉当天
+document.getElementById('dayDrawerAdd').addEventListener('click', () => {
+  if (!currentDrawerDay) return;
+  closeDayDrawer();
+  openModal('新 建 任 务', null, { due: currentDrawerDay });
+});
+document.getElementById('dayDrawerOverlay').addEventListener('click', (ev) => {
+  // 点蒙层(非 drawer 本体)关闭
+  if (ev.target === ev.currentTarget) closeDayDrawer();
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && document.getElementById('dayDrawerOverlay').classList.contains('open')) {
+    closeDayDrawer();
+  }
+});
+
+// Init
+readViewStateFromUrl();
+// 列表系统: 从 localStorage 恢复当前列表 (2026-08-24 起不再用 URL, 地址栏保持干净)
+const _ls = localStorage.getItem('todoCurrentList');
+if (_ls) currentListId = _ls;
+updateOwnerControls();
+applyView();   // 静态首屏按 DEFAULT_VIEW 只显示了日历; 带 ?view= 深链时先纠正再渲染, 避免闪一下
+syncViewUrl('replace');
+loadTasks();
+// 加载所有列表 (会依据 currentListId 加载对应条目)
+loadLists();
+</script>
+<!-- y8y-darklight-engine (由 darklight-sync.py 维护, 勿手改) -->
+<script src="assets/darklight.js?v=1"></script>
+<script src="assets/ui.js?v=6"></script>
+<script>window.darklight && darklight.prePaint();</script>
+<!-- /y8y-darklight-engine -->
+
+<!-- y8y 共享 UI 组件：最后加载，保证同特异性下覆盖各站历史规则（2026-09-22 整合）-->
+<link rel="stylesheet" href="assets/ui.css?v=7147d229">
+</body>
+</html>

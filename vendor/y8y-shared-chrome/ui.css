@@ -1,0 +1,180 @@
+/* ============================================================================
+   ui.css — y8y 共享 UI 组件（2026-09-22 建立，批准）
+   vendored 副本 (vendor/y8y-shared-chrome/)   → 各站经 /assets/ui.css?v=N 引用
+
+   目的：把各站重复实现、且**实现细节已经漂移**的组件收成单一来源。
+   目前迁入：弹窗遮罩（.y8y-overlay）。后续按同一模式迁按钮 / 卡片 / 表格 / 设置面板骨架。
+
+   ⚠️ 迁移约定（避免特异性打架）：
+     1. HTML 上**追加**共享类（`class="modal-overlay y8y-overlay"`），站内旧类保留 —— 站内 JS 靠旧类找元素，不动它。
+     2. 站内 CSS 里**与本文件重复的属性**（background / z-index）必须删掉，否则同特异性下由加载顺序决定胜负、不可控。
+     3. 本文件**不管 display / 打开机制** —— 各站有自己的约定（.open / .show / [hidden] / inline style），
+        强行统一要改各站 JS，收益不值。共享类只负责"长什么样"。
+   ========================================================================== */
+
+/* ── 弹窗遮罩 ───────────────────────────────────────────────────────────────
+   统一前各站漂移情况（2026-09-22 审计）：
+     遮罩色  dash rgba(0,0,0,.5) / docs rgba(0,0,0,.7) / book rgba(26,26,26,.5) + .dark-mode 另写一套
+     z-index dash·docs·todo 300 / book 1000 / ai 99（低于 header，刻意为让齿轮可点）
+   统一为：rgba(0,0,0,.5) + z-index 300（设置面板用 .y8y-under-header 降到 99）。 */
+.y8y-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background-color: rgba(0, 0, 0, .5);
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+/* ⚠️ 2026-09-22 修正：**不要**把设置面板的 z-index 压到 header(100) 以下。
+   曾经的想法是「低于 header ⇒ 点齿轮也能关面板」，但代价是**整个面板都在 header 底下** ——
+   面板顶部的关闭按钮被 header 挡住点不到（Playwright 实测：`<header> intercepts pointer events`）。
+   现在统一 300：遮罩盖住 header，用户用面板内的关闭按钮 / Esc 关闭（这是标准做法）。
+   本类保留为**语义标记**（哪些是设置面板），不再改 z-index。 */
+.y8y-overlay.y8y-under-header { /* z-index 与普通 overlay 相同(300) */ }
+
+/* ── 弹窗容器 ───────────────────────────────────────────────────────────────
+   配合 .y8y-overlay 用（overlay 负责遮罩+居中，modal 负责卡片外观）。 */
+.y8y-modal {
+  position: relative;
+  background-color: var(--bg-surface);
+  border: 3px solid var(--border-default);
+  box-shadow: 6px 6px 0 var(--shadow-pixel);
+  color: var(--text-primary);
+  padding: 20px;
+  width: min(440px, 100%);
+  max-height: 85vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* ── 按钮 ───────────────────────────────────────────────────────────────────
+   统一前各站漂移（2026-09-22 审计）：同类东西 5 个类名、~180 处 HTML
+     .action-btn 65 处（dash/docs/book/shop/night）  .btn 41 处（todo/cost/night）
+     .hbtn 2 处（ai）  .settings-opt / .owner-toggle / .mode-btn（选项组）
+   做法：HTML **追加**共享类（旧类名保留 —— 各站 JS 靠旧类找元素），
+   样式一律由本文件提供（结构：边框/硬阴影/hover/active/focus/间距/字号）。
+   ⚠️ 各站的**语义色变体**（ai 的 btn-green/btn-orange/btn-stop 代表启动/停止、
+      todo 的 btn-danger）保持不变 —— 那不是漂移，是语义，统一了反而丢信息。 */
+.y8y-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  border: 2px solid var(--border-default);
+  background-color: var(--bg-surface);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+  color: var(--text-primary);
+  font-family: inherit; font-size: var(--fs-13); font-weight: bold;
+  padding: 8px 14px; cursor: pointer;
+  text-decoration: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.y8y-btn:hover { border-color: var(--color-brand); }
+.y8y-btn:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--shadow-pixel); }
+.y8y-btn:focus-visible { outline: 3px solid var(--color-brand); outline-offset: 2px; }
+.y8y-btn:disabled, .y8y-btn[disabled] { opacity: .5; cursor: not-allowed; box-shadow: none; transform: none; }
+/* 图标在按钮里统一 14px（两档制小档） */
+.y8y-btn .y8i { --y8i-size: 14px; }
+
+/* 变体（形状语义，不是颜色语义） */
+.y8y-btn-primary { background-color: var(--color-brand); color: var(--bg-surface); }
+.y8y-btn-danger  { background-color: var(--color-danger); color: var(--bg-surface); }
+.y8y-btn-ghost   { background-color: transparent; box-shadow: none; }
+.y8y-btn-sm      { font-size: var(--fs-12); padding: 4px 10px; box-shadow: 2px 2px 0 var(--shadow-pixel); }
+.y8y-btn-icon    { width: 34px; height: 34px; min-width: 34px; padding: 0; }
+
+/* ── 选项组按钮（有「选中态」的：owner-toggle / settings-opt / mode-btn）─────
+   选中态用「橙字 + 橙边」，不用橙底 —— 和去框分段保持同一套语言。 */
+.y8y-seg { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.y8y-seg-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 2px solid var(--border-default);
+  background-color: var(--bg-surface);
+  box-shadow: 2px 2px 0 var(--shadow-pixel);
+  color: var(--text-primary);
+  font-family: inherit; font-size: var(--fs-12);
+  padding: 6px 12px; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.y8y-seg-btn:hover { border-color: var(--color-brand); }
+.y8y-seg-btn.active, .y8y-seg-btn[aria-selected="true"], .y8y-seg-btn[aria-pressed="true"] {
+  color: var(--color-brand); border-color: var(--color-brand);
+}
+.y8y-seg-btn .y8i { --y8i-size: 14px; }
+
+/* ── 去框分段（有选中态、靠图标+文字变橙表示选中；2026-09-20 定案）──────
+   用于 todo 的视图 tab / book·shop 的导航按钮。 */
+.y8y-seg-flat {
+  display: inline-flex; align-items: center; gap: 6px;
+  background-color: transparent; border: none; box-shadow: none;
+  color: var(--text-muted);
+  font-family: inherit; font-size: var(--fs-12);
+  padding: 6px 10px; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.y8y-seg-flat:hover { background-color: var(--bg-surface); color: var(--text-primary); }
+.y8y-seg-flat.active, .y8y-seg-flat[aria-selected="true"] { color: var(--color-brand); }
+.y8y-seg-flat .y8i { --y8i-size: 14px; }
+
+/* ── 设置面板骨架 ───────────────────────────────────────────────────────────
+   统一前各站漂移（2026-09-22 审计）：
+     分组间距 18px(dash/shop) / 20px(todo) / 14px(book)；标签字号 11(dash/todo/shop) / 12(book/docs) / 13(cost)
+     标签色 token 两套：--text-muted vs book 的旧名 --muted；类名更散：settings-group / settings-section / setRow / modal-label
+   统一为下面这一套。各站 HTML **追加**共享类（旧类保留给 JS 用），站内重复属性删掉。 */
+.y8y-settings-group { margin-bottom: 18px; }
+
+.y8y-settings-label {
+  display: block;
+  font-size: var(--fs-11);
+  font-family: var(--font-ui);
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+/* 行式布局：标签在左、控件在右（ai / cost 那种） */
+.y8y-settings-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+}
+
+/* 选项按钮组（配合 .y8y-seg / .y8y-seg-btn 用） */
+.y8y-settings-opts { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* 面板标题行 */
+.y8y-settings-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 16px;
+}
+
+/* ── 刷新按钮（2026-09-22：每个页面都要有，放在设置齿轮左边，纯图标）──────────
+   动机：以前只能按浏览器 F5 全量重载（重下所有资源 + 重新初始化），又慢又不"聪明"。
+   这个按钮走**数据级刷新** —— 只重拉数据、不重载页面。
+   行为由各站注册（共享 JS ui.js 负责绑定与 busy 态）：
+       window.y8yRefresh = async () => { await Promise.all([loadTasks(), loadLists()]); };
+   ⚠️ 2026-09-23：**本按钮不再自带 `margin-left:auto`**。靠右改由右侧槽容器
+   `.y8y-header-right` 承担（header.css）—— 过去 auto 挂在本按钮上，导致
+   「视觉位置 = DOM 顺序的函数」：往它后面插按钮会拆散【刷新】【设置】这对，
+   插前面又会被顶到品牌旁边（实测 left 1296 → 200）。各站必须把右侧按钮包进
+   `.y8y-header-right` 容器，不要指望本按钮自己靠右。 */
+.y8y-refresh-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; min-width: 34px; padding: 0;
+  /* ⚠️ min/max-height 必须显式写：不少站有全局 `button{min-height:44px}`，
+     min-height 在盒模型里**永远赢过** height ⇒ 不写就变成 34×44（y8yAI 实测踩到过）。 */
+  min-height: 34px; max-height: 34px;
+  border: 2px solid var(--border-default);
+  background-color: var(--bg-surface);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+  color: var(--text-primary);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.y8y-refresh-btn:hover { border-color: var(--color-brand); }
+.y8y-refresh-btn:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--shadow-pixel); }
+.y8y-refresh-btn:focus-visible { outline: 3px solid var(--color-brand); outline-offset: 2px; }
+.y8y-refresh-btn .y8i { --y8i-size: 20px; }
+/* busy：像素风不做旋转，用闪烁 + 降饱和表示"正在拉数据" */
+.y8y-refresh-btn.busy { pointer-events: none; }
+.y8y-refresh-btn.busy .y8i { animation: y8y-refresh-blink .7s steps(2, end) infinite; }
+@keyframes y8y-refresh-blink { 0% { opacity: 1; } 100% { opacity: .25; } }

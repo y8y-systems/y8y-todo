@@ -1,0 +1,107 @@
+Fusion Pixel Font / 缝合像素字体
+================================
+
+来源   : https://github.com/TakWolf/fusion-pixel-font
+发行版 : 2026.10.16 (https://github.com/TakWolf/fusion-pixel-font/releases/tag/2026.10.16)
+作者   : TakWolf <https://takwolf.com>
+版权   : Copyright (c) 2022, TakWolf
+授权   : SIL Open Font License, Version 1.1 —— 全文见同目录 OFL.txt
+
+本目录下的字体文件
+------------------
+
+文件名里的 12 位十六进制是**该文件内容的 sha256 前 12 位**（内容寻址），
+不是手写版本号：
+
+    fusion-pixel-<规格>-<宽度模式>-<地区变体>.<sha256[:12]>.otf.woff2
+
+这样服务端可以对字体发 `immutable` 长缓存（一年），同时保证「以后换字体
+时旧用户不会继续加载旧文件」—— 换字体 = 内容变 = 文件名变 = URL 变，
+浏览器缓存不可能再命中旧字体。
+
+换字体的正确做法（tests/test_font_assets.py 会逐条核对）：
+
+  1. 用上游新 Release 的 woff2 覆盖本目录下的文件，**并按新内容重算 sha256
+     改文件名**（`git mv` 旧名 → 新名，别在原地覆盖）；
+  2. 同步更新 vendor/y8y-shared-chrome/tokens.css 里 @font-face 的 url()；
+  3. 同步更新 src/index.html 里 <link rel="preload"> 的 href；
+  4. 同步更新本文件的文件名与 SHA256 行；
+  5. 改完 tokens.css 后**重算 tokens.css 的 sha256 前 8 位**，写回
+     src/index.html 里 assets/tokens.css?v=…（否则浏览器会拿旧 CSS 缓存）。
+
+fusion-pixel-12px-proportional-zh_hans.037fb51624ec.otf.woff2
+    Fusion Pixel 12px Prop zh-Hans —— 比例模式（Proportional），简体中文字形变体
+    上游压缩包 : fusion-pixel-font-12px-proportional-otf.woff2-v2026.10.16.zip
+    下载直链   : https://github.com/TakWolf/fusion-pixel-font/releases/download/2026.10.16/fusion-pixel-font-12px-proportional-otf.woff2-v2026.10.16.zip
+    SHA256     : 037fb51624ec39500a6be28f7eac4aa6a8c9366205b2344dd2b4f182879519ce
+
+只带这一款
+----------
+
+全站只有**中文 12px 比例**这一款字体，理由（fontTools 实测）：
+
+  * 比例档与等宽档对**中日韩汉字完全一致**（都是全宽 1200/1000 em）；
+  * 两档的**数字 advance width 也完全一致**（0-9 同为 600/1000 em，即数字
+    都是等宽数字）—— 所以本站唯一需要严格对齐的地方（日历格里的日期数字、
+    日期/时间输入框）用比例档一样成列对齐，不必为此多带一份 650KB；
+  * 两档的差别只在拉丁字母宽度（比例档的 i/l/. 更窄、W/M 更宽）。
+
+上游的 10px 规格原本是给「小标签/徽章」做 1:1 清晰渲染的；现在统一由 12px
+字体在 10/11px 下缩放，小字档会略糊。代价换取：字体资源 1723 KB → 664 KB
+（少 61%）、首屏少两个请求、@font-face 只一处、也不必再区分「等宽档/小档」。
+
+改动声明
+--------
+
+**这些字体文件未经任何修改、转换或子集化**：直接取自上游官方 Release 的
+woff2 压缩包，文件名与内容均保持原样。应用层只做「引用」，不改字体本身。
+
+因此：
+  * 字体内部名（Fusion Pixel 12px Prop zh-Hans 等）与上游一致；
+  * OFL 1.1 第 3 节的 Reserved Font Name（"Fusion Pixel Font"）得以保留 ——
+    本项目没有对字体做修改，也就不构成「Modified Version」，无需改名。
+  * 若日后要做子集化或任何改动，**必须**改用不含 "Fusion Pixel Font"
+    这个保留字体名的新名称（OFL 1.1 §3），并在此文件里重新记录改动内容。
+
+为什么只选 zh-Hans 变体
+------------------------
+
+上游为每个「尺寸 × 宽度模式」提供 7 个地区字形变体（latin / zh-Hans /
+zh-Hant / zh-HK / zh-TW / ja / ko）。实测（fontTools 解析）：
+
+  * 七个变体的 cmap **完全一致**（12px 档：比例 37,689 个字符 / 等宽 37,415 个；
+    10px 档 25,385 个），
+    覆盖拉丁字母、简体中文、繁体中文、日文假名与常用汉字、韩文；
+  * 拉丁字母与数字的 advance width 在各变体间**完全相同**；
+  * 变体之间的唯一差别是**部分共用汉字的字形写法**（地区字形）。
+
+本站 UI 主语言为简体中文（<html lang="zh-CN">），需要完整覆盖中文、英文与
+日文。选 zh-Hans 一个变体即可覆盖全部三种文字，代价为每档少带 6 份只差
+少量字形、却各有约 670 KB 的重复文件；日文汉字按上游「缝合」字体的既定
+行为使用简体字形（日文假名与全部日文用汉字均正常显示，不缺字）。
+
+覆盖差异（实测，fontTools）
+--------------------------
+
+12px 比例档覆盖 19,317 个汉字、37,689 个字符（含拉丁、日文假名、繁体、
+常用符号）。本站只用这一档，所以：
+
+  * 固定界面文字 —— 100% 覆盖，无回退；
+  * **用户自己输入**的内容（任务标题、描述、列表名、项目名）遇到字体外的
+    生僻字/繁体字/扩展区汉字，会回落到系统等宽栈。这是已知取舍，不是缺陷：
+    常用汉字（GB2312 一级字表 3755 字）在字体里 100% 覆盖。
+
+  tests/test_font_coverage.py 会把这条保证钉住：字体丢掉常用汉字，CI 就红。
+
+上游组件字体许可证
+------------------
+
+Fusion Pixel 是由多个上游字体「缝合」而成的衍生字体，其 OFL 与本目录
+OFL.txt 一起分发；各组件字体的原始许可证一并保留在 LICENSES/ 下：
+
+  LICENSES/ark-pixel/OFL.txt   方舟像素字体 / Ark Pixel Font (OFL-1.1)
+  LICENSES/cubic-11/OFL.txt    俐方體 11 號 / Cubic 11 (OFL-1.1)
+  LICENSES/galmuri/LICENSE.txt Galmuri (OFL-1.1)
+
+完整的上游许可清单见：
+https://github.com/TakWolf/fusion-pixel-font#许可证

@@ -1,0 +1,328 @@
+name: p4-upgrade-rehearsal
+
+# P4 生产切换前隔离演练 (任何人都可复现):
+#   虚构旧版格式数据 → 旧版(生产基线)真实读写 → 备份+校验
+#   → 迁移到新版数据目录 → 新版完整生命周期 → 浏览器冒烟
+#   → 升级前后快照比对 → 回滚 drill A (恢复备份) → 回滚 drill B (不恢复)。
+# 旧版代码从 rehearsal/legacy-baseline/ 原样提取 (vendored 快照, 不依赖
+# git 历史 — 公开仓库没有私人历史也能跑), 不做任何修改; 全程虚构数据;
+# Google Calendar 只用虚构凭据 (无 SDK, 结构上不可能发出真实同步请求)。
+# 服务生命周期 (停止/端口释放/监听者身份) 由 scripts/p4-ci-lifecycle.sh
+# 硬断言 — 杜绝"遗留进程顶替导致回滚假阳性" (独立审查问题 B)。
+on:
+  pull_request:
+    branches:
+      - main
+      - 'feature/**'
+  push:
+    branches:
+      - main
+      - 'feature/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upgrade-rehearsal:
+    name: P4 升级/回滚隔离演练 (Ubuntu 24.04, 旧版基线 vs 新版)
+    runs-on: ubuntu-24.04
+    # shell: bash → bash --noprofile --norc -eo pipefail {0}
+    # 必须 pipefail: 各步骤用 'python3 ... | tee -a /tmp/rehearsal.log' 留痕,
+    # 默认 shell (bash -e, 无 pipefail) 会用 tee 的退出码掩盖脚本失败 —
+    # 那会让 FAIL 的检查也显示为绿 (独立审查同类问题)。
+    defaults:
+      run:
+        shell: bash
+    env:
+      # 旧版兼容基线: 行为等价的匿名化副本 (身份已通用化, 见
+      # rehearsal/legacy-baseline/README.md — 不是任何历史源码的
+      # 逐字节快照), 验证历史数据格式/权限/升级兼容行为。
+      # 以 vendored 快照形式存放在仓库内 (manifest 校验完整性),
+      # 不依赖 git 历史 — 全新公开仓库 (单一初始 commit) 也能演练。
+      BASELINE: rehearsal/legacy-baseline
+      OLD_DATA: /var/lib/todolist-legacy
+      NEW_DATA: /home/e2euser/y8y-data
+      OLD_PORT: '8086'
+      NEW_PORT: '8087'
+      Y8Y_USER: e2euser
+      ALICE_EMAIL: alice@example.com
+      BOB_EMAIL: bob@example.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        # 不需要 fetch-depth: 0 — 旧版基线已 vendored, 与 git 历史无关
+        # (公开仓库从干净快照开始, 不依赖任何私有历史 commit)。
+
+      - name: Verify the vendored legacy baseline (manifest sha256)
+        run: |
+          cd "$BASELINE"
+          shasum -a 256 -c MANIFEST.sha256
+          echo "baseline integrity: OK ($(grep -c . MANIFEST.sha256) files)"
+          echo "旧版 serve.py 行数: $(wc -l < src/serve.py)"
+          echo "旧版 google_calendar.py 行数: $(wc -l < src/google_calendar.py)"
+
+      - name: Extract the old version and stage the hardcoded production paths
+        run: |
+          # 旧版硬编码 /var/lib/todolist-legacy 与 /var/lib/todolist-legacy/shared/chrome
+          # (生产形态)。隔离 runner 上以 root 原样运行, 不做任何代码修改。
+          set -x
+          mkdir -p /tmp/old-version
+          cp -r "$BASELINE"/. /tmp/old-version/
+          sudo mkdir -p /var/lib/todolist-legacy/shared/chrome /var/lib || { echo "FATAL: mkdir /var/lib/todolist-legacy failed"; exit 1; }
+          sudo cp /tmp/old-version/vendor/y8y-shared-chrome/*.py /var/lib/todolist-legacy/shared/chrome/ || { echo "FATAL: cp chrome failed"; exit 1; }
+          sudo cp -r /tmp/old-version/src /var/lib/todolist-legacy/src || { echo "FATAL: cp src failed"; exit 1; }
+          sudo chmod -R a+rX /var/lib/todolist-legacy
+          # 注意: runner 用户无法穿透 /root (700) — 一切 /root 下的验证都必须 sudo
+          sudo test -f /var/lib/todolist-legacy/src/serve.py || { echo "FATAL: serve.py missing"; exit 1; }
+          sudo test -f /var/lib/todolist-legacy/shared/chrome/static_guard.py || { echo "FATAL: static_guard.py missing"; exit 1; }
+          set +x
+          echo "old version staged (unmodified, vendored snapshot)"
+
+      - name: Build the fictional legacy-format dataset
+        run: |
+          sudo python3 scripts/p4-rehearsal.py build-data "$OLD_DATA" | tee -a /tmp/rehearsal.log
+          sudo test -f "$OLD_DATA/internal_tokens.json"
+          echo "dataset ready at $OLD_DATA"
+
+      - name: Verify only FICTIONAL Google credentials and no SDK (structural guarantee)
+        run: |
+          # 结构保证: 无 google SDK → 两版都不可能调用真实 Google
+          if pip list 2>/dev/null | grep -i google; then
+            echo "google SDK present — refusing to rehearse"; exit 1
+          fi
+          # 数据集里的凭据必须全部是虚构内容 (防真实凭据混入演练 fixture)
+          sudo python3 scripts/p4-rehearsal.py creds-check "$OLD_DATA" | tee -a /tmp/rehearsal.log
+          echo "OK: fictional credentials only, no SDK — no real Google calls possible"
+
+      - name: Phase 1 — start the OLD version (unmodified, root, port ${{ env.OLD_PORT }})
+        run: |
+          source scripts/p4-ci-lifecycle.sh
+          # 防御性确认: 演练开始前 8086 必须无人占用
+          p4_stop_service /tmp/old.pid "$OLD_PORT" "old version (pre-phase-1)"
+          sudo bash -c "cd /var/lib/todolist-legacy/src && exec nohup python3 serve.py > /tmp/old-server.log 2>&1 & echo \$! > /tmp/old.pid"
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$OLD_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) echo "old version up (HTTP $code)"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;; *) echo "old version failed to start"; cat /tmp/old-server.log; exit 1;; esac
+          # 问题 B: 证明端口正由本阶段启动的进程监听 (排除遗留顶替)
+          p4_assert_listener "$OLD_PORT" /tmp/old.pid "old version"
+          cp /tmp/old.pid /tmp/old-phase1.pid
+          echo "old server pid=$(cat /tmp/old.pid) user=$(ps -o user= -p "$(cat /tmp/old.pid)")"
+
+      - name: Phase 1 — old version reads and writes the legacy data
+        run: |
+          sudo env P4_TOKENS_FILE="$OLD_DATA/internal_tokens.json" \
+            python3 scripts/p4-rehearsal.py old-check \
+            "http://127.0.0.1:$OLD_PORT" alice | tee -a /tmp/rehearsal.log
+
+      - name: Phase 2 — snapshot, backup and verify the pre-upgrade state
+        run: |
+          sudo python3 scripts/p4-rehearsal.py snapshot "$OLD_DATA" /tmp/snap-pre.json | tee -a /tmp/rehearsal.log
+          sudo python3 scripts/p4-rehearsal.py backup "$OLD_DATA" /tmp/backup-pre.tar.gz | tee -a /tmp/rehearsal.log
+          sudo python3 scripts/p4-rehearsal.py creds-check "$OLD_DATA" | tee -a /tmp/rehearsal.log
+          ls -la /tmp/backup-pre.tar.gz /tmp/backup-pre.tar.gz.sha256
+
+      - name: Phase 2 — stop the old version and confirm the port is released
+        run: |
+          # 问题 B: Drill A 要在同一端口重启旧版 — 必须先停干净并确认端口释放,
+          # 否则第二次启动会失败而遗留进程继续响应 (回滚假阳性)。
+          source scripts/p4-ci-lifecycle.sh
+          p4_stop_service /tmp/old.pid "$OLD_PORT" "old version (phase 1)"
+
+      - name: Phase 3 — install the new version to /opt and start it (non-root)
+        run: |
+          # 与 README/P3 一致的安装形态: 代码装到 /opt/y8y-todo, 服务用户只读
+          sudo useradd -m -s /bin/bash "$Y8Y_USER" || true
+          id "$Y8Y_USER"
+          sudo mkdir -p /opt/y8y-todo
+          sudo cp -r "$GITHUB_WORKSPACE"/. /opt/y8y-todo/
+          sudo chown -R "$Y8Y_USER:$Y8Y_USER" /opt/y8y-todo
+          sudo mkdir -p "$NEW_DATA"
+          sudo cp -r "$OLD_DATA"/. "$NEW_DATA"/
+          sudo chown -R "$Y8Y_USER:$Y8Y_USER" "$NEW_DATA"
+          # 解释器显式固定为系统 python (与文档化的 unit 默认一致), 并打印核对
+          PYBIN=/usr/bin/python3
+          echo "new version interpreter: $PYBIN → $("$PYBIN" --version 2>&1)"
+          sudo -u "$Y8Y_USER" bash -c "
+            cd /opt/y8y-todo
+            export Y8Y_USERS='$ALICE_EMAIL=alice,$BOB_EMAIL=bob'
+            export Y8Y_TRUSTED_PROXIES='127.0.0.1'
+            export Y8Y_DATA_DIR='$NEW_DATA'
+            export Y8Y_PORT='$NEW_PORT'
+            export Y8Y_BIND='127.0.0.1'
+            export Y8Y_TIMEZONE='Asia/Tokyo'
+            nohup $PYBIN src/serve.py > /tmp/new-server.log 2>&1 &
+            echo \$! > /tmp/new.pid
+          "
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$NEW_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) echo "new version up (HTTP $code)"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;; *) echo "new version failed to start"; cat /tmp/new-server.log; exit 1;; esac
+          source scripts/p4-ci-lifecycle.sh
+          p4_assert_listener "$NEW_PORT" /tmp/new.pid "new version"
+          echo "new server pid=$(cat /tmp/new.pid) user=$(ps -o user= -p "$(cat /tmp/new.pid)")"
+          echo "new server exe: $(sudo readlink /proc/$(cat /tmp/new.pid)/exe)"
+
+      - name: Phase 3 — new version full lifecycle on the migrated data
+        run: |
+          sudo env P4_TOKENS_FILE="$NEW_DATA/internal_tokens.json" \
+            python3 scripts/p4-rehearsal.py new-check \
+            "http://127.0.0.1:$NEW_PORT" "$ALICE_EMAIL" alice | tee -a /tmp/rehearsal.log
+
+      - name: Phase 3 — browser smoke on the upgraded instance (real Chromium)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install --quiet playwright
+          .venv/bin/playwright install --with-deps chromium
+          .venv/bin/python scripts/p4-browser-smoke.py \
+            "http://127.0.0.1:$NEW_PORT" "$ALICE_EMAIL" | tee -a /tmp/rehearsal.log
+
+      - name: Phase 3 — compare pre/post-upgrade snapshots
+        run: |
+          sudo python3 scripts/p4-rehearsal.py snapshot "$NEW_DATA" /tmp/snap-post.json | tee -a /tmp/rehearsal.log
+          python3 scripts/p4-rehearsal.py diff-snapshots /tmp/snap-pre.json /tmp/snap-post.json | tee -a /tmp/rehearsal.log
+
+      - name: Phase 4 — rollback drill A (restore the pre-upgrade backup)
+        run: |
+          source scripts/p4-ci-lifecycle.sh
+          # 1. 停新版并确认端口释放
+          p4_stop_service /tmp/new.pid "$NEW_PORT" "new version"
+          # 2. 模拟升级失败: 旧数据目录回到备份状态 (先清空再恢复)
+          sudo rm -rf "$OLD_DATA"
+          sudo python3 scripts/p4-rehearsal.py restore /tmp/backup-pre.tar.gz "$OLD_DATA" | tee -a /tmp/rehearsal.log
+          # 3. 启动旧版 (此时 8086 必须无人监听 — phase 1 的实例已停)
+          sudo bash -c "cd /var/lib/todolist-legacy/src && exec nohup python3 serve.py > /tmp/old-server-a.log 2>&1 & echo \$! > /tmp/old.pid"
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$OLD_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) echo "old version back up (HTTP $code)"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;; *) echo "rollback drill A failed"; cat /tmp/old-server-a.log; exit 1;; esac
+          # 4. 问题 B: 证明请求到达的是 drill A 本次启动的进程, 不是 phase 1 遗留
+          p4_assert_listener "$OLD_PORT" /tmp/old.pid "old version (drill A)"
+          p4_assert_distinct /tmp/old.pid /tmp/old-phase1.pid "drill A restart"
+          echo "drill A old server: pid=$(cat /tmp/old.pid) user=$(ps -o user= -p "$(cat /tmp/old.pid)") exe=$(sudo readlink /proc/$(cat /tmp/old.pid)/exe)"
+          cp /tmp/old.pid /tmp/old-drilla.pid
+          # 5. 恢复出的备份必须仍能被旧版完整使用 (含写操作)
+          sudo env P4_TOKENS_FILE="$OLD_DATA/internal_tokens.json" \
+            python3 scripts/p4-rehearsal.py old-check \
+            "http://127.0.0.1:$OLD_PORT" alice | tee -a /tmp/rehearsal.log
+          # 6. 生产形态的凭据校验: 以归档清单 + SHA-256 为准 (不依赖 fictional)
+          sudo python3 scripts/p4-rehearsal.py creds-verify \
+            /tmp/backup-pre.tar.gz "$OLD_DATA" | tee -a /tmp/rehearsal.log
+
+      - name: Phase 4 — rollback drill B (old version reads post-upgrade data, no restore)
+        run: |
+          source scripts/p4-ci-lifecycle.sh
+          # 1. 停 drill A 的旧版并确认端口释放 (替换数据前必须无服务在跑)
+          p4_stop_service /tmp/old.pid "$OLD_PORT" "old version (drill A)"
+          # 2. 不恢复备份: 旧版直接读新版写过的数据 (最危险的回归路径)
+          sudo rm -rf "$OLD_DATA"
+          sudo mkdir -p "$OLD_DATA"
+          sudo cp -r "$NEW_DATA"/. "$OLD_DATA"/
+          # 3. 启动旧版
+          sudo bash -c "cd /var/lib/todolist-legacy/src && exec nohup python3 serve.py > /tmp/old-server-b.log 2>&1 & echo \$! > /tmp/old.pid"
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$OLD_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) echo "old version up on post-upgrade data (HTTP $code)"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;; *) echo "rollback drill B failed to start"; cat /tmp/old-server-b.log; exit 1;; esac
+          # 4. 问题 B: 证明请求到达 drill B 本次启动的进程, 不是 drill A 遗留
+          p4_assert_listener "$OLD_PORT" /tmp/old.pid "old version (drill B)"
+          p4_assert_distinct /tmp/old.pid /tmp/old-drilla.pid "drill B restart"
+          echo "drill B old server: pid=$(cat /tmp/old.pid) user=$(ps -o user= -p "$(cat /tmp/old.pid)") exe=$(sudo readlink /proc/$(cat /tmp/old.pid)/exe)"
+          # 5. 风险核查 + 凭据仍与归档清单一致 (生产形态校验)
+          sudo env P4_TOKENS_FILE="$OLD_DATA/internal_tokens.json" \
+            python3 scripts/p4-rehearsal.py rollback-check \
+            "http://127.0.0.1:$OLD_PORT" alice "$OLD_DATA" | tee -a /tmp/rehearsal.log
+          sudo python3 scripts/p4-rehearsal.py creds-verify \
+            /tmp/backup-pre.tar.gz "$OLD_DATA" | tee -a /tmp/rehearsal.log
+
+      - name: Rehearsal summary
+        if: always()
+        run: |
+          {
+            echo '## P4 隔离演练摘要'
+            echo
+            echo "- 旧版基线: vendored snapshot rehearsal/legacy-baseline (manifest 校验, 未修改, root, 端口 $OLD_PORT)"
+            echo "- 新版: /opt/y8y-todo, 非 root 用户 $Y8Y_USER, 端口 $NEW_PORT"
+            echo '- 数据集: 虚构旧版格式 (任务/项目/重复/归档/列表/购物/持久项目/'
+            echo '  内部 token/虚构 Google 凭据)'
+            echo '- Google: 仅虚构凭据, 无 SDK, 结构上无真实同步'
+            echo '- 服务生命周期: 每阶段停止→端口释放→监听者 PID 断言 (问题 B 修复)'
+            echo '- 备份/恢复: 统一格式 (tar 根=数据目录内容 + JSON sha256 清单,'
+            echo '  含 Google 凭据逐文件校验) — 问题 A/C 修复'
+            echo '- restore 安全语义: 先验证后写入, 失败不动目标, 非空目标拒绝覆盖'
+            echo '- 凭据校验: creds-verify (归档清单+SHA-256, 生产形态) / creds-check'
+            echo '  (fictional 标记, 仅 CI 防真实凭据混入)'
+            echo '- shell: bash (pipefail) — | tee 留痕不会掩盖脚本失败退出码'
+            echo
+            grep -E '^(旧版验证|新版验证|回滚核查|结果:|备份完成|恢复完成|快照:|升级前后比对|drill|.*port .* is served)' /tmp/rehearsal.log || true
+            echo
+            echo '### FINDING (已确认的回滚风险, 详见 docs/upgrade-runbook.md)'
+            grep -E '\[FINDING' /tmp/rehearsal.log || echo '(无)'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the full rehearsal log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p4-rehearsal-log
+          path: /tmp/rehearsal.log
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Show server logs on failure
+        if: failure()
+        run: |
+          echo '--- old server (phase 1) ---'; sudo tail -30 /tmp/old-server.log 2>/dev/null || true
+          echo '--- old server drill A ---'; sudo tail -30 /tmp/old-server-a.log 2>/dev/null || true
+          echo '--- old server drill B ---'; sudo tail -30 /tmp/old-server-b.log 2>/dev/null || true
+          echo '--- new server ---'; tail -30 /tmp/new-server.log 2>/dev/null || true
+          echo '--- listeners ---'; sudo ss -tlnp | grep -E ':808[67] ' || true
+
+  # ─────────────────────────────────────────────────────────────
+  # CI Gate — 稳定名称的汇总检查
+  #
+  #   Ruleset 的 Required Status Checks 只配这 4 个名字:
+  #     gate / pytest   gate / ubuntu   gate / e2e   gate / upgrade
+  #   内部测试 job 怎么增删改名, Ruleset 都不用动。
+  #
+  # ⚠️ 机制 (别简化):
+  #   · needs  —— 本 workflow 的**全部**测试 job
+  #   · if: always() —— 上游失败时本 job 仍然跑。
+  #     没有它: 上游失败 → 本 job 被 skip → GitHub 把 skipped 当成
+  #     「已满足 Required Check」→ 门形同虚设。
+  #   · 判定 —— 显式检查每个 needs.<job>.result, 任何非 success
+  #     (failure / cancelled / skipped) 都让本 job **失败**。
+  #     必须是 failure 而不是 skipped。
+  #
+  # 维护: 新增/删除/重命名内部测试 job 时, 同步改下面的 needs
+  # (见 AGENTS.md §4.1)。判定逻辑在 scripts/ci-gate-check.sh, 四处共用。
+  # ─────────────────────────────────────────────────────────────
+  gate-upgrade:
+    name: gate / upgrade
+    runs-on: ubuntu-latest
+    needs: [upgrade-rehearsal]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - name: Aggregate upstream results
+        env:
+          RESULT_upgraderehearsal: ${{ needs.upgrade-rehearsal.result }}
+        run: |
+          set -euo pipefail
+          upstream=""
+          upstream="$upstream upgraderehearsal=${RESULT_upgraderehearsal}"
+          echo "upstream: $upstream"
+          CI_GATE_UPSTREAM="$upstream" bash scripts/ci-gate-check.sh

@@ -1,0 +1,411 @@
+/* ═══ y8y-chrome 共享品牌 header — 单一源 (2026-08-27 定稿) ═══
+   全站 header 几何完全一致 → 切页零位移。覆盖各应用共用 class:
+     <header class="header">
+       <a/button class="brand-btn" onclick="...设置...">   ← 或 .brand-wrap
+         <span class="brand-mark"><img src="assets/logo_zoom.png"></span>
+         <h1><span class="logo-accent">y8y</span>PRODUCT</h1>
+       </a/button>
+       <div class="header-right">...各应用专属按钮...</div>   ← 可选插槽
+     </header>
+   改这份 = 全站 header 生效。logo 点击=设置是默认约定。 */
+
+/* ── 外框 (唯一来源: 内边距/高度/横条/背景) ── */
+.header {
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  box-sizing: border-box;
+  height: 64px;                 /* 37 logo + 24 padding + 3 border */
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 12px 24px;
+  border-bottom: 3px solid var(--border-default);
+  background: var(--bg-section);
+  position: relative;
+  z-index: 100;
+}
+.header > * { flex: none; }
+
+/* ── 品牌容器 (logo + 标题, 点击=设置) ── */
+.brand-wrap, .brand-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.brand-btn {
+  border: 0; background: none; padding: 0;
+  cursor: pointer;
+  text-decoration: none;          /* 品牌作为 <a> 跳 dash, 去下划线 */
+  color: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+.brand-btn, .brand-btn:visited, .brand-btn:hover, .brand-btn:focus-visible,
+.brand-btn *, .brand-btn:hover * {
+  text-decoration: none;          /* 品牌 <a> 任何状态(含 hover)去下划线 */
+}
+.brand-btn:hover { opacity: .85; }
+.brand-btn:focus-visible { outline: 3px solid var(--color-brand); outline-offset: 2px; }
+
+/* ── logo 块 (37px 方块, 单一来源) ── */
+.brand-mark {
+  width: 37px; height: 37px;
+  padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+  border: 2px solid var(--color-brand);
+  box-shadow: 4px 4px 0 var(--shadow-pixel);
+  background: transparent;
+}
+.brand-mark img { display: block; width: 100%; height: 100%; object-fit: cover; image-rendering: pixelated; }
+
+/* ── header 内图标尺寸（单一来源，全站生效）─────────────────────────
+   2026-09-20 定案：header 按钮统一 20px。
+   34px 按钮里 24px 偏大、12px 偏小；20px 与 13px 文字比例最协调。
+   ⚠️ 20px 在 DPR=2 下 k=1.667（非整数，像素块宽 1/2 混排）—— 是已知取舍，非疏漏。
+   行内小字场景仍用 icons.css 的默认 24px 或显式 --y8i-14（12px 档已废弃）。 */
+.header .y8i { --y8i-size: var(--y8i-20, 20px); }
+
+/* ── 品牌文字 (y8y 橙小写 + 产品全大写, 单一来源) ── */
+.header h1,
+.header .header-txt h1,
+.header .brand-btn .brand-text,   /* book 用 span 排版 */
+.header .brand-text {
+  font-family: 'Zpix', ui-monospace, SFMono-Regular, Consolas, monospace;  /* 全站 logo 统一像素字 */
+  font-size: var(--fs-24);
+  line-height: 1.2;
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  font-weight: bold;
+  color: var(--text-primary);
+  margin: 0;
+  white-space: nowrap;
+}
+.header h1 .logo-accent { color: var(--color-brand); text-transform: none; }
+.logo-accent { text-transform: none; }
+
+/* ── 老类 `.header-right`（无 y8y- 前缀）────────────────────────────────────────
+   ⚠️ 2026-09-23：**它不再负责靠右**（`margin-left:auto` 已移除）。原因：语义已被用乱
+   （todo 拿它当中间槽、docs/night/ai 拿它当右侧组），一个类承担两种意图必然打架。
+   右侧一律用 `.y8y-header-right` 容器（见下）；本块只保留「横排」这一点兼容行为，
+   供尚未迁移干净的站使用。 */
+.header .header-right {
+  display: flex; align-items: center; gap: 8px;
+  flex: none;
+}
+
+/* ── 右侧槽「容器」契约 —— .y8y-header-right（2026-09-23 补）────────────────────
+   三层对称：左 = 品牌（几何契约）· 中 = `.y8y-header-center`（居中槽）·
+   右 = `.y8y-header-right`（本块）。右侧过去**没有容器**，只有「某个按钮身上挂一个
+   `margin-left: auto`」的隐式约定（现在是 .y8y-refresh-btn，见 ui.css），后果：
+   **视觉位置 = DOM 顺序的函数** —— 往刷新后面插东西会把【刷新】【设置】这对拆开，
+   插到前面又会被那个 auto 顶到品牌旁边（实测 left 1296 → 200）。容器让 auto 归组，
+   组内顺序自由，刷新与设置永远相邻、设置永远最右。
+
+   用法：把右侧那组按钮包进 <div class="y8y-header-right">…</div>，
+   组内顺序自由（推荐：动作按钮 → 刷新 → 设置）。
+   ⚠️ `.header-right`（无 y8y- 前缀）是**各站历史类名**，语义已经被用乱
+      （todo 拿它当中间槽），别再往它上面加东西；右侧一律用 `.y8y-header-right`。 */
+.header .y8y-header-right {
+  margin-left: auto;
+  display: flex; align-items: center; gap: 12px;   /* 与 .header 的 gap 同值，视觉不变 */
+  flex: none;
+}
+/* 组内不需要单独的 auto —— 清掉刷新按钮自带的那个，避免两个 auto 平分空间把按钮拆开 */
+.header .y8y-header-right .y8y-refresh-btn { margin-left: 0; }
+
+/* ── header 中间槽：横排 + 绝对居中（2026-09-23 定版）──────────────────────
+   契约：各站把「header 里那坨 menu / 导航 / 视图 tab」的**容器**追加共享类
+   `.y8y-header-center`（站内旧类一律保留，如 .header-right / .nav / .y8y-nav /
+   .header-actions）。**位置与排布由本块负责，各站不要再给它写定位 CSS。**
+
+   为什么必须 absolute 居中，而不是 `margin: 0 auto`：
+     品牌块宽 ≈232px、右侧按钮组 ≈104px；`auto` 只在**剩余空间**里居中，
+     实测偏差 42px（todo / shop 改版前的真实偏移）。
+     absolute + translate(-50%,-50%) 是相对**页面中心**居中 ——
+     实测槽中心 == 页面中心，误差 0px（1400/1280/1100 三档都成立）。
+
+   ⚠️ 只在 >620px 生效：≤620px 时共享 ui.js 会把整槽**搬进 ☰ 面板**，
+   那时它必须回到普通流。因为本块在 media 里，面板态天然 static（无需覆写）。
+   ⚠️ 桌面端**不做**「装不下就收进 ☰」的降级（定案 2026-09-23：桌面不会装不下）。
+   ⚠️ 项高契约：槽内每个项 34px（与 header 的 .settings-btn / .y8y-refresh-btn 同档），
+      各站在展开新项时照此对齐，否则跨站切换时高度会跳。 */
+@media (min-width: 621px) {
+  .header .y8y-header-center {
+    position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    display: flex; align-items: center; gap: 8px;
+    z-index: 2;
+    /* 清掉各站旧类自带的 margin-left: auto（.header-right 有），免得意图的歧义 */
+    margin: 0;
+  }
+}
+
+/* ── 中间槽「项」规范 —— 方案 B（2026-09-23 定案，全站唯一来源）──────────────
+   槽的语义（固化）：**只放有「选中态」的导航 / 视图切换**。
+   动作按钮（新建任务、重算对比…）**不进槽**，走右侧的 `.y8y-header-action`（橙色）。
+   混放会让「我在哪」（选中态）和「我能做什么」（动作）互相干扰。
+
+   项规格：高 34 · 图标 **24px**（图标资产原生画布档，1:1 最锐利）· 文字 **13px** ·
+   2px 边框 · 内距 0 10px · 图标↔文字 6px · 槽内项间距 8px · 选中 = 橙框 + 橙字。
+
+   ⚠️ 选择器必须比 ui.css 的 `.y8y-seg-flat .y8i`(0,2,0) 更具体：多个站把 `.y8y-seg-flat`
+      当项类用，而 ui.css 在 header.css **之后**加载 —— 同特异性时它赢，曾把 header 档的
+      图标压成面板小档 14px（todo 实测）。这里 0,3,0 + 图标 0,4,0，稳赢。
+   ⚠️ 只在 >620px 生效：≤620px 整槽进 ☰ 面板，面板里的排布由面板自己的规则管。 */
+@media (min-width: 621px) {
+  .header .y8y-header-center .y8y-slot-item {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    /* ⚠️ width/min-height 必须显式写：站内常有 `.view-tab{width:34px;height:34px}` 一类
+       固定尺寸（同特异性下会压过本块）—— 不写 width:auto 的话，加了文字也被卡在 34px 宽里 */
+    width: auto; min-width: 34px; height: 34px; min-height: 34px; max-height: 34px;
+    padding: 0 10px; flex: none;
+    border: 2px solid var(--border-default);
+    background-color: var(--bg-surface);
+    color: var(--text-muted);
+    font-family: inherit; font-size: var(--fs-13); font-weight: bold;
+    white-space: nowrap; text-decoration: none;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+  }
+  .header .y8y-header-center .y8y-slot-item .y8i { --y8i-size: 24px; display: block; flex: none; }
+  /* 项内文字：由共享 ui.js 按 data-y8y-menu-label 生成（桌面/面板同一个类，见 ui.js）
+     —— 各站不要自己在 HTML 里再写一遍文字，否则面板里会出现两份。 */
+  .header .y8y-header-center .y8y-slot-item .y8y-menu-label { margin: 0; font-size: var(--fs-13); }
+  .header .y8y-header-center .y8y-slot-item:hover {
+    color: var(--text-primary); border-color: var(--color-brand); text-decoration: none;
+  }
+  /* 选中态：各站既有 4 种约定都认（aria-selected / .active / .is-active / aria-current） */
+  .header .y8y-header-center .y8y-slot-item[aria-selected="true"],
+  .header .y8y-header-center .y8y-slot-item.active,
+  .header .y8y-header-center .y8y-slot-item.is-active,
+  .header .y8y-header-center .y8y-slot-item[aria-current="page"] {
+    color: var(--color-brand); border-color: var(--color-brand);
+  }
+}
+
+/* ── header 右侧「动作按钮」规范（橙色实心 + 硬阴影，2026-09-23 定案）──────────────
+   语义（固化）：**有副作用 / 改数据的动作** → 右侧 + 橙色；导航/视图切换 → 中间槽。
+   样式基准 = todo「新建任务」按钮（header.css 里 .settings-btn 的硬阴影也注释为「同款」）。
+   位置：插在 `.y8y-refresh-btn` **之后**、`.settings-btn` 之前 —— 右侧的 `margin-left:auto`
+   由刷新按钮承担，**动作按钮不要再加 auto**（两个 auto 会均分剩余空间把按钮拆开，已踩过）。
+   ⚠️ 只在 >620px 生效：≤620px 该按钮进 ☰ 面板，沿用各站自己的样式（面板里有文字标签）。 */
+@media (min-width: 621px) {
+  .header .y8y-header-action {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    width: 34px; height: 34px; min-width: 34px; padding: 0; flex: none;
+    min-height: 34px; max-height: 34px;   /* 同 .y8y-refresh-btn：对抗全局 button{min-height:44px} */
+    border: 2px solid var(--text-primary);
+    background-color: var(--color-brand);
+    color: var(--bg-surface);
+    font-family: inherit; font-size: var(--fs-13); font-weight: bold;
+    cursor: pointer; white-space: nowrap;
+    box-shadow: 3px 3px 0 var(--shadow-pixel);
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* 带文字的动作按钮：加这个修饰类（宽度自适应） */
+  .header .y8y-header-action.y8y-header-action-label { width: auto; padding: 0 10px; }
+  .header .y8y-header-action .y8i { --y8i-size: var(--y8i-20, 20px); display: block; flex: none; }
+  .header .y8y-header-action:hover { background-color: var(--bg-surface); color: var(--color-brand); }
+  .header .y8y-header-action:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 var(--shadow-pixel); }
+  .header .y8y-header-action:focus-visible { outline: 3px solid var(--color-brand); outline-offset: 3px; }
+}
+
+/* ── 独立设置按钮 (放标题右侧; logo→dash, 设置钮独立) ──
+   2026-09-22 定案：**设置 / 刷新这类「无选中态的操作按钮」恢复方形边框**
+   （纯图标按钮光靠 hover 淡底不够像按钮）。
+   边框/hover 取自 2026-09-06 的原样式（backup: header.css.bak-20260906T114953）。
+   ⚠️ 2026-09-23 **反转**了 09-22 的「有选中态的导航不要加边框」：现在定案
+   **加 2px 边框更好**（更像按钮、和刷新/齿轮成一组），中间槽的项规格见下方
+   `.y8y-slot-item`（选中 = 橙框 + 橙字）。旧约定作废，别再照它写新页。 */
+.header .settings-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; flex: none;
+  /* ⚠️ min/max-height 必须显式写：全局 `button{min-height:44px}` 的站（y8yAI 等）
+     会让 min-height 赢过 height ⇒ 不写就是 34×44（2026-09-22 曾发现「不是正方形」）。 */
+  min-height: 34px; max-height: 34px;
+  border: 2px solid var(--border-default);
+  /* ⚠️ 必须用 background-color 而不是 background 简写！
+     `background: none` 会连 background-image 一起重置 —— 而 docs 的 settings 按钮是
+     「按钮自身即图标」（<button class="settings-btn y8i y8i-settings">），图标就在元素背景上，
+     简写会把图标整块干掉（2026-09-21 实测踩到：右上角图标变成破碎像素块）。
+     其他站图标在子 span 上，所以一直没暴露。 */
+  background-color: var(--bg-surface);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);   /* 像素按钮：硬阴影（与 todo 的「新建任务」按钮同款） */
+  /* 「设置永远最右」现在由**右侧槽容器** `.y8y-header-right`（见下）保证 —— 不再靠
+     margin-left:auto。那条路已走死：auto 挂在**单个按钮**身上时，视觉位置 = DOM 顺序的函数，
+     往它后面插按钮会拆散【刷新】【设置】这对（实测 left 1296 → 200，跳回品牌旁边）。
+     历史失败记录（别再试）：order:999 + auto → cost 溢出 186px、book 的 brand-img 被拉成 1152px；
+     只留 auto → 与各站原有的「靠右元素」打架；position:absolute → 与延伸到右边的元素重叠。 */
+  color: var(--text-primary);
+  font-family: inherit; font-size: var(--fs-16); padding: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.header .settings-btn:hover { opacity: .85; border-color: var(--color-brand); }
+.header .settings-btn:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--shadow-pixel); }
+.header .settings-btn:focus-visible { outline: 3px solid var(--color-brand); outline-offset: 2px; }
+/* ── dash 按钮 (logo 右侧, 跳 y8ySYSTEMS 控制台; 2026-09-06 共用) ── */
+.header .dash-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; flex: none;
+  border: 2px solid var(--border-default);
+  background-color: var(--bg-surface);   /* 同 settings-btn：不能用 background 简写 */
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+  color: var(--color-brand);
+  font-family: inherit; font-size: var(--fs-14); padding: 0;
+  cursor: pointer; text-decoration: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.header .dash-btn:hover { opacity: .85; border-color: var(--color-brand); }
+.header .dash-btn:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--shadow-pixel); }
+.header .dash-btn:focus-visible { outline: 3px solid var(--color-brand); outline-offset: 2px; }
+.header .dash-btn::after { content: "◉"; }
+
+/* ── 品牌拆分链接 (2026-09-06): 图片=跳 dash, 文字=跳本服务 home ── */
+.brand-img, .brand-title {
+  border: 0; background: none; padding: 0;
+  cursor: pointer; text-decoration: none; color: inherit;
+  -webkit-tap-highlight-color: transparent;
+  display: flex; align-items: center;
+}
+.brand-img:hover { opacity: .85; }
+.brand-title { margin-left: 12px; }
+.brand-title:hover { opacity: .85; }
+.brand-title:focus-visible,
+.brand-img:focus-visible { outline: 3px solid var(--color-brand); outline-offset: 2px; }
+
+/* 品牌 logo 文字: 全局 a:hover 下划线也可能命中 <a class="brand-title">,
+   这里显式覆盖, 任何状态(含 hover/visited/active)都无下划线 (2026-09-06) */
+.brand-title, .brand-title:hover, .brand-title:visited,
+.brand-title:active, .brand-title:focus-visible,
+.brand-img, .brand-img:hover, .brand-img:visited { text-decoration: none; }
+
+/* ── 移动端 header 压缩（2026-09-20 定案）─────────────────────
+   问题：34px 按钮 / 24px 横向 padding / 12px gap 在 ≤430px 下装不下
+   todo 的 12 个 header 子元素 → 内容 402px 超出视口（390px 溢出 12px、
+   375px 溢出 27px），最右的「+」按钮被推出屏幕（flex-wrap: nowrap 不换行）。
+   对策：收紧 padding + gap，品牌文字降一档（24 → 18px），共省约 70px。
+   影响：全站 header。docs 本来就用 12px，收紧后一致；其余站更宽松，不会改坏。
+   ⚠️ 必须放在文件末尾：品牌文字的 font-size 规则在文件前部，同特异性下
+      后出现的胜出，放前面会被它覆盖（实测踩过）。 */
+@media (max-width: 430px) {
+  .header { padding: 12px 12px; gap: 8px; }
+  .header h1,
+  .header .header-txt h1,
+  .header .brand-btn .brand-text,
+  .header .brand-text { font-size: var(--fs-18); }
+}
+
+/* ═══ 手机端「一个 menu 收全部」（2026-09-23 定案，全站统一）═══════════════════
+   手机（≤620px）header 只留三个按钮：【☰ 菜单】【刷新】【设置】；
+   其余控件（各站 header 里的中间槽：.header-right / .header-actions / .y8y-nav /
+   .nav / .nav-group / .ns-switch …）由共享 `/assets/ui.js` **移动**进下方面板，
+   宽屏自动移回原位。
+
+   为什么是 JS 移动 DOM、而不是各站再写一份手机版 HTML：
+     · 各站中间槽的类名/数量/顺序都不同，写两份 = 必然漂移（这就是本层存在的理由）；
+     · 事件监听器跟着元素走，各站 JS 完全不受影响；
+     · 面板挂在 header **内部**，所以各站既有的 `.header .action-btn` 一类选择器
+       在面板里照样命中（元素没有被搬到 header 之外）。
+   逃生口：任何元素加 `data-y8y-header-keep` 属性 ⇒ ui.js 不收它（给"进某模式就必须
+   一抬手能点到"的组用，比如编辑器的保存组）。 */
+.header .y8y-menu-btn, .header .y8y-menu-panel { display: none; }
+
+@media (max-width: 620px) {
+  .header .y8y-menu-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px;
+    /* ⚠️ min-height 必须显式写回：不少站有全局 `button{min-height:44px}`，而 min-height
+       在盒模型里永远赢过 height ⇒ 不写就被撑成 34×44（2026-09-22 在 console 上踩过）。 */
+    min-height: 34px; max-height: 34px;
+    flex: none; padding: 0;
+    border: 2px solid var(--border-default);
+    background-color: var(--bg-surface);
+    color: var(--text-primary);
+    box-shadow: 3px 3px 0 var(--shadow-pixel);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .header .y8y-menu-btn:hover { color: var(--color-brand); border-color: var(--color-brand); }
+  .header .y8y-menu-btn:active { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--shadow-pixel); }
+  /* 菜单里没东西可放（该站 header 本来就没有中间控件，如 review）⇒ 不摆按钮。
+     ui.js 只设属性，显隐仍由 CSS 决定。 */
+  .header .y8y-menu-btn[data-empty="1"] { display: none; }
+
+  /* ── 靠右：手机端由 [data-y8y-menu-lead] 统一承担 ──────────────────────────────
+     桌面端的"靠右"其实挂在各站中间槽（.header-right / .header-actions…）的 margin-left:auto
+     上（另加 .y8y-refresh-btn 自带一个）。手机端中间槽被收进菜单 ⇒ 那个 auto 随之失效，
+     留下来的按钮就全挤在左边（y8yAI 实测：右边空出 125px，因为它的刷新是 #refresh.hbtn、
+     自己没有 auto，其他站恰好有才没事）。
+     现在：ui.js 给"留下来的第一个可见元素"打 data-y8y-menu-lead，它吃 auto；同时清掉
+     .y8y-refresh-btn 自带的 auto —— **只能有一个 auto**，两个会均分剩余空间把按钮拆开
+     （2026-09-22 已踩过）。lead 规则写在后面，同特异性下由它胜出。 */
+  .header .y8y-refresh-btn { margin-left: 0; }
+  .header [data-y8y-menu-lead] { margin-left: auto; }
+
+  /* 面板里给图标按钮补文字：元素带 data-y8y-menu-label="列表" ⇒ ui.js 在面板态生成
+     <span class="y8y-menu-label">列表</span>（还原时移除）。header 上空间紧、只能放图标，
+     面板里没这个限制 —— 一排纯图标（还常有重复图标）读不出是干什么的。 */
+  .header .y8y-menu-panel .y8y-menu-label { margin-left: 8px; }
+
+  /* 面板：从 header 下沿整宽展开、按钮一列（定案 ②-1） */
+  .header .y8y-menu-panel {
+    display: none;
+    position: absolute; top: 100%; left: 0; right: 0;
+    flex-direction: column; align-items: stretch; gap: 8px;
+    padding: 12px;
+    background: var(--bg-section);
+    border-bottom: 3px solid var(--border-default);
+    box-shadow: 0 6px 0 var(--shadow-pixel);
+    z-index: 101;                         /* header 自身 z-index:100，面板在其层叠上下文内 */
+    max-height: calc(100vh - 64px);
+    overflow-y: auto;
+  }
+  .header .y8y-menu-panel.open { display: flex; }
+
+  /* 面板内：所有直接子级铺满，容器一律改竖排（它们在 header 上是横排） */
+  .header .y8y-menu-panel > * { width: 100%; margin-left: 0 !important; margin-right: 0 !important; }
+  .header .y8y-menu-panel .header-right,
+  .header .y8y-menu-panel .header-actions,
+  .header .y8y-menu-panel .actions-group,
+  .header .y8y-menu-panel .nav-group,
+  .header .y8y-menu-panel .y8y-nav,
+  .header .y8y-menu-panel .nav {
+    display: flex !important; flex-direction: column; align-items: stretch;
+    gap: 8px; width: 100%; margin: 0 !important; overflow: visible;
+  }
+  .header .y8y-menu-panel button,
+  .header .y8y-menu-panel a {
+    width: 100%; justify-content: flex-start; text-align: left;
+  }
+  /* 面板里不缺横向空间：页内导航的文字标签恢复显示（header 上图标-only 是为了省地方） */
+  .header .y8y-menu-panel .y8y-nav-link { height: 40px; }
+  .header .y8y-menu-panel .y8y-nav-link .nav-label { display: inline !important; }
+  /* 面板里不缺横向空间 ⇒ 恢复被各站手机档隐藏的「文字段」（各站叫法不同：.hxt /
+     .hbtn-label / .btn-label）。header 上按钮只留图标是为了省地方，进了面板就没必要藏 ——
+     否则面板里一排光秃秃的图标（有些还是同一个 reload 图标）根本读不出是干什么的。 */
+  .header .y8y-menu-panel .hxt,
+  .header .y8y-menu-panel .hbtn-label,
+  .header .y8y-menu-panel .btn-label { display: inline !important; }
+  .header .y8y-menu-panel .y8y-nav-link .y8i { --y8i-size: var(--y8i-20, 20px); }
+}
+
+/* ── 共享：设置面板里的「主题」切换（2026-09-22：dark/light 统一收进设置）──────
+   各站无需写 JS —— 按钮协议由 /assets/darklight.js 提供：
+     <button data-y8y-theme="auto|light|dark">  点击即设 + 自动 active / aria-pressed
+   插入位置：设置面板内的任一分组容器（各站用自己已有的 settings-group / settings-section）。 */
+.y8y-theme-switch { display: flex; gap: 8px; flex-wrap: wrap; }
+.y8y-theme-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 34px;
+  border: 2px solid var(--border-default);
+  background-color: var(--bg-surface);
+  box-shadow: 3px 3px 0 var(--shadow-pixel);
+  color: var(--text-primary);
+  font-family: inherit; font-size: var(--fs-12);
+  padding: 6px 12px; cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.y8y-theme-btn:hover { border-color: var(--color-brand); }
+.y8y-theme-btn.active { background-color: var(--color-brand); color: var(--bg-surface); }
+.y8y-theme-btn .y8i { --y8i-size: 14px; }   /* 面板内 = 页面内容层级（两档制小档） */

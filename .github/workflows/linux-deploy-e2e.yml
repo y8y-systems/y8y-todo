@@ -1,0 +1,475 @@
+name: linux-deploy-e2e
+
+# 从 GitHub 源码开始的全新 Linux 部署验证 (任何人都可复现):
+#   非 root 用户 → 环境变量配置 → 启动 → HTTP API 全功能 → 认证边界
+#   → y8ysystems 契约 → 磁盘布局 → 停止重启 → 数据持久化。
+# 浏览器作业额外验证真实 UI 操作 (Chromium)。
+# systemd 作业严格按 README / docs/deployment.md §5 的安装流程执行,
+# 用真正的 systemd (systemctl enable/start/restart/stop) 驱动打包的
+# unit 文件 — 不是 nohup 冒充。
+on:
+  pull_request:
+    branches:
+      - main
+      - 'feature/**'
+  push:
+    branches:
+      - main
+      - 'feature/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-e2e:
+    name: Linux fresh-install E2E (Ubuntu 24.04, Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12']
+    env:
+      Y8Y_USER: e2euser
+      Y8Y_HOME: /home/e2euser
+      PROD_PORT: '8087'
+      DEV_PORT: '8086'
+    steps:
+      - name: Checkout code (fresh clone from GitHub)
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Show environment (read-only facts)
+        run: |
+          python3 --version
+          echo "runtime deps needed by the core: none (Python stdlib only)"
+          if [ -f requirements.txt ]; then cat requirements.txt; fi
+
+      - name: Create dedicated non-root user and data dir
+        run: |
+          sudo useradd -m -s /bin/bash "$Y8Y_USER" || true
+          sudo mkdir -p "$Y8Y_HOME/y8y-data"
+          sudo chown -R "$Y8Y_USER:$Y8Y_USER" "$Y8Y_HOME/y8y-data"
+          id "$Y8Y_USER"
+          test "$(id -u "$Y8Y_USER")" -ne 0 || { echo "must not be root"; exit 1; }
+
+      - name: Pin the service interpreter to the matrix Python
+        run: |
+          # 复现 + 修复 (Task C): sudo 的 env_reset + secure_path 会抹掉
+          # setup-python 放进 PATH 的解释器。下面先打印证据 —— 直接
+          # 'sudo -u e2euser python3' 解析到的是系统 python (24.04 → 3.12),
+          # 矩阵里的 3.11 实际上从来跑的是 3.12。
+          # 修复: 在这里解析矩阵解释器的绝对路径, 之后所有服务启动都
+          # 显式使用它, 并从事后 /proc/<pid>/exe 核对。
+          PYBIN="$(command -v python3)"
+          echo "matrix target:  ${{ matrix.python-version }}"
+          echo "runner python3:  $PYBIN → $(python3 --version 2>&1)"
+          echo "what plain 'sudo -u $Y8Y_USER python3' resolves to (the bug):"
+          sudo -u "$Y8Y_USER" bash -c 'command -v python3; python3 --version' || true
+          ACTUAL="$("$PYBIN" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+          if [ "$ACTUAL" != "${{ matrix.python-version }}" ]; then
+            echo "runner interpreter is $ACTUAL but the matrix wants ${{ matrix.python-version }}"
+            exit 1
+          fi
+          sudo -u "$Y8Y_USER" "$PYBIN" --version >/dev/null || {
+            echo "the service user cannot execute $PYBIN"; exit 1; }
+          echo "PYBIN=$PYBIN" >> "$GITHUB_ENV"
+          echo "pinned service interpreter: $PYBIN (Python $ACTUAL)"
+
+      - name: Install the app to /opt/y8y-todo (like the README)
+        run: |
+          # GH 的工作区对其它用户不可读; 真实安装也是把代码放到 /opt 下
+          sudo mkdir -p /opt/y8y-todo
+          sudo cp -r "$GITHUB_WORKSPACE"/. /opt/y8y-todo/
+          sudo chown -R "$Y8Y_USER:$Y8Y_USER" /opt/y8y-todo
+          sudo -u "$Y8Y_USER" test -r /opt/y8y-todo/src/serve.py
+          echo "installed; running as: $(stat -c '%U' /opt/y8y-todo/src/serve.py)"
+
+      - name: Install machine token file (fictional)
+        run: |
+          echo '{"e2e": "ci-e2e-token-abc123"}' | sudo tee "$Y8Y_HOME/y8y-data/internal_tokens.json" > /dev/null
+          sudo chown "$Y8Y_USER:$Y8Y_USER" "$Y8Y_HOME/y8y-data/internal_tokens.json"
+
+      - name: Start production-mode server (non-root user, env config)
+        run: |
+          sudo -u "$Y8Y_USER" bash -c "
+            cd /opt/y8y-todo
+            export Y8Y_USERS='e2e@example.com=e2e'
+            export Y8Y_TRUSTED_PROXIES='127.0.0.1'
+            export Y8Y_DATA_DIR='$Y8Y_HOME/y8y-data'
+            export Y8Y_PORT='$PROD_PORT'
+            export Y8Y_BIND='127.0.0.1'
+            nohup $PYBIN src/serve.py > /tmp/y8y-prod.log 2>&1 &
+            echo \$! > /tmp/y8y-prod.pid
+          "
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PROD_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) echo "server up (HTTP $code)"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;; *) echo "server failed to start"; cat /tmp/y8y-prod.log; exit 1;; esac
+
+      - name: Verify the service runs as non-root on the matrix interpreter
+        run: |
+          PID="$(cat /tmp/y8y-prod.pid)"
+          SRV_USER="$(ps -o user= -p "$PID" | tr -d ' ')"
+          SRV_EXE="$(sudo readlink "/proc/$PID/exe")"
+          echo "service pid=$PID user=$SRV_USER"
+          echo "service interpreter: $SRV_EXE → $("$SRV_EXE" --version 2>&1)"
+          if [ "$SRV_USER" != "$Y8Y_USER" ]; then
+            echo "server is NOT running as $Y8Y_USER"; exit 1
+          fi
+          if [ "$(realpath "$SRV_EXE")" != "$(realpath "$PYBIN")" ]; then
+            echo "service interpreter ($SRV_EXE) is not the matrix interpreter ($PYBIN)"; exit 1
+          fi
+          echo "OK: runs as $SRV_USER (non-root) on the matrix Python"
+
+      - name: Verify default data directory placement (no Y8Y_DATA_DIR)
+        run: |
+          # 不设 Y8Y_DATA_DIR 的生产实例 → 数据应落在用户的 OS 数据目录
+          # (-H: 让 HOME 指向 e2euser, 否则默认目录会解析到 runner 的家)
+          sudo -H -u "$Y8Y_USER" bash -c "
+            cd /opt/y8y-todo
+            export Y8Y_USERS='e2e@example.com=e2e'
+            export Y8Y_TRUSTED_PROXIES='127.0.0.1'
+            export Y8Y_PORT='8088'
+            nohup $PYBIN src/serve.py > /tmp/y8y-default.log 2>&1 &
+            echo \$! > /tmp/y8y-default.pid
+          "
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:8088/todo/api/tasks" || true)
+            case "$code" in 200|401) break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;; *) echo "default instance failed"; cat /tmp/y8y-default.log; exit 1;; esac
+          # 目录是懒创建的: 先写一个任务, 再验证落点
+          curl -s --noproxy '*' -X POST "http://127.0.0.1:8088/todo/api/tasks" \
+            -H 'Content-Type: application/json' \
+            -H 'Cf-Access-Authenticated-User-Email: e2e@example.com' \
+            -d '{"title":"默认目录验证","due":"2026-10-20"}' -o /dev/null -w 'create → %{http_code}\n'
+          sudo -u "$Y8Y_USER" bash -c 'kill $(cat /tmp/y8y-default.pid)' || true
+          test -d "$Y8Y_HOME/.local/share/y8y-todo/todo" \
+            || { echo "default data dir missing"; cat /tmp/y8y-default.log; exit 1; }
+          test -n "$(ls -A "$Y8Y_HOME/.local/share/y8y-todo/todo" 2>/dev/null)" \
+            || { echo "no task file under the default data dir"; exit 1; }
+          echo "OK: default data dir = $Y8Y_HOME/.local/share/y8y-todo (task written there)"
+
+      - name: E2E API — full phase (auth, tasks, lists, contract, disk)
+        run: |
+          python3 scripts/e2e-api.py full \
+            "http://127.0.0.1:$PROD_PORT" e2e@example.com ci-e2e-token-abc123 \
+            /tmp/e2e-state.json "$Y8Y_HOME/y8y-data"
+
+      - name: Stop, restart, verify data persistence
+        run: |
+          sudo -u "$Y8Y_USER" bash -c 'kill $(cat /tmp/y8y-prod.pid)' || true
+          # 等端口真正释放再重启 (否则新进程绑定失败)
+          for i in $(seq 1 15); do
+            if ! curl -s --noproxy '*' -o /dev/null "http://127.0.0.1:$PROD_PORT/todo/api/tasks"; then
+              break
+            fi
+            sleep 1
+          done
+          sudo -u "$Y8Y_USER" bash -c "
+            cd /opt/y8y-todo
+            export Y8Y_USERS='e2e@example.com=e2e'
+            export Y8Y_TRUSTED_PROXIES='127.0.0.1'
+            export Y8Y_DATA_DIR='$Y8Y_HOME/y8y-data'
+            export Y8Y_PORT='$PROD_PORT'
+            export Y8Y_BIND='127.0.0.1'
+            nohup $PYBIN src/serve.py > /tmp/y8y-prod2.log 2>&1 &
+            echo \$! > /tmp/y8y-prod.pid
+          "
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PROD_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;; *) echo "restart failed"; cat /tmp/y8y-prod2.log; exit 1;; esac
+          # 重启后同样核对: 非 root + 矩阵解释器
+          PID="$(cat /tmp/y8y-prod.pid)"
+          SRV_USER="$(ps -o user= -p "$PID" | tr -d ' ')"
+          SRV_EXE="$(sudo readlink "/proc/$PID/exe")"
+          echo "after restart: pid=$PID user=$SRV_USER interpreter=$SRV_EXE"
+          [ "$SRV_USER" = "$Y8Y_USER" ] || { echo "not running as $Y8Y_USER"; exit 1; }
+          [ "$(realpath "$SRV_EXE")" = "$(realpath "$PYBIN")" ] || {
+            echo "restarted service is not on the matrix interpreter"; exit 1; }
+          python3 scripts/e2e-api.py persist \
+            "http://127.0.0.1:$PROD_PORT" e2e@example.com ci-e2e-token-abc123 \
+            /tmp/e2e-state.json "$Y8Y_HOME/y8y-data"
+
+      - name: Show server log on failure
+        if: failure()
+        run: |
+          echo '--- /tmp/y8y-prod.log ---'; tail -50 /tmp/y8y-prod.log 2>/dev/null || true
+          echo '--- /tmp/y8y-prod2.log ---'; tail -50 /tmp/y8y-prod2.log 2>/dev/null || true
+
+  systemd-e2e:
+    name: Linux systemd E2E (Ubuntu 24.04, packaged unit, real systemd)
+    runs-on: ubuntu-24.04
+    env:
+      Y8Y_USER: y8y
+      Y8Y_HOME: /var/lib/y8y-todo
+      PROD_PORT: '8086'
+    steps:
+      - name: Checkout code (fresh clone from GitHub)
+        uses: actions/checkout@v4
+
+      - name: Show systemd and Python facts
+        run: |
+          systemctl --version | head -1
+          echo "runner python3: $(command -v python3) → $(python3 --version 2>&1)"
+          echo "system python3: /usr/bin/python3 → $(/usr/bin/python3 --version 2>&1)"
+
+      # ↓↓↓ 以下完全按照 README / docs/deployment.md §5 的流程执行 ↓↓↓
+      - name: Create the dedicated non-root service user (as documented)
+        run: |
+          sudo useradd --system --user-group -d "$Y8Y_HOME" \
+            --shell /usr/sbin/nologin "$Y8Y_USER" || true
+          sudo mkdir -p "$Y8Y_HOME"
+          sudo chown "$Y8Y_USER:$Y8Y_USER" "$Y8Y_HOME"
+          id "$Y8Y_USER"
+          test "$(id -u "$Y8Y_USER")" -ne 0 || { echo "must not be root"; exit 1; }
+          test "$(id -gn "$Y8Y_USER")" = "$Y8Y_USER" || { echo "group $Y8Y_USER missing"; exit 1; }
+
+      - name: Install the code to /opt/y8y-todo (root-owned, world-readable)
+        run: |
+          sudo mkdir -p /opt/y8y-todo
+          sudo cp -r "$GITHUB_WORKSPACE"/. /opt/y8y-todo/
+          # 对齐文档承诺的所有权: 代码 root 拥有、全局可读, 服务只读
+          sudo chown -R root:root /opt/y8y-todo
+          sudo chmod -R a+rX /opt/y8y-todo
+          sudo -u "$Y8Y_USER" test -r /opt/y8y-todo/src/serve.py
+          # unit 以 'python3 <脚本>' 方式启动, 不需要 .py 可执行位;
+          # 改用 unit 实际使用的解释器确认拷贝过来的代码可编译
+          /usr/bin/python3 -c "compile(open('/opt/y8y-todo/src/serve.py', encoding='utf-8').read(), 'serve.py', 'exec')"
+          stat -c '%U:%G %a %n' /opt/y8y-todo /opt/y8y-todo/src/serve.py
+
+      - name: Write the environment file (fictional identity)
+        run: |
+          sudo mkdir -p /etc/y8y-todo
+          sudo cp /opt/y8y-todo/packaging/y8y-todo.env.example /etc/y8y-todo/y8y-todo.env
+          sudo chmod 600 /etc/y8y-todo/y8y-todo.env
+          # 文档里这一步是 "$EDITOR 改身份配置"; CI 换成本虚构值
+          sudo sed -i 's|^Y8Y_USERS=.*|Y8Y_USERS=e2e@example.com=e2e|' \
+            /etc/y8y-todo/y8y-todo.env
+          stat -c '%U:%G %a %n' /etc/y8y-todo/y8y-todo.env
+          echo '{"e2e": "ci-e2e-token-abc123"}' \
+            | sudo tee "$Y8Y_HOME/internal_tokens.json" > /dev/null
+          sudo chown "$Y8Y_USER:$Y8Y_USER" "$Y8Y_HOME/internal_tokens.json"
+          sudo chmod 600 "$Y8Y_HOME/internal_tokens.json"
+
+      - name: Install the packaged unit and verify it statically
+        run: |
+          sudo cp /opt/y8y-todo/packaging/y8y-todo.service \
+            /etc/systemd/system/y8y-todo.service
+          # 静态验证: unit 语法 / ExecStart 路径 / 依赖 / EnvironmentFile
+          systemd-analyze verify /etc/systemd/system/y8y-todo.service
+          echo "static unit verification passed (systemd-analyze verify)"
+
+      - name: Start the service with real systemd
+        run: |
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now y8y-todo
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:$PROD_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) echo "service up (HTTP $code)"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;;
+            *) echo "service failed to start under systemd"
+               sudo journalctl -u y8y-todo --no-pager -n 50 || true
+               exit 1;;
+          esac
+          echo "is-active: $(systemctl is-active y8y-todo || true)"
+          echo "UnitFileState: $(systemctl show -p UnitFileState --value y8y-todo)"
+          echo "ActiveState: $(systemctl show -p ActiveState --value y8y-todo)"
+          echo "SubState: $(systemctl show -p SubState --value y8y-todo)"
+
+      - name: Verify service user, state and interpreter under systemd
+        run: |
+          [ "$(systemctl show -p ActiveState --value y8y-todo)" = "active" ] \
+            || { echo "unit is not active"; sudo journalctl -u y8y-todo --no-pager -n 30 || true; exit 1; }
+          PID="$(systemctl show -p MainPID --value y8y-todo)"
+          SRV_USER="$(ps -o user= -p "$PID" | tr -d ' ')"
+          SRV_EXE="$(sudo readlink "/proc/$PID/exe")"
+          echo "MainPID=$PID user=$SRV_USER"
+          echo "interpreter: $SRV_EXE → $("$SRV_EXE" --version 2>&1)"
+          echo "cmdline: $(tr '\0' ' ' < "/proc/$PID/cmdline")"
+          echo "unit User=$(systemctl show -p User --value y8y-todo) Group=$(systemctl show -p Group --value y8y-todo)"
+          echo "unit WorkingDirectory=$(systemctl show -p WorkingDirectory --value y8y-todo)"
+          [ "$SRV_USER" = "$Y8Y_USER" ] \
+            || { echo "service is not running as $Y8Y_USER"; exit 1; }
+          # 文档承诺 unit 用系统 python; 这里核对实际解释器
+          if [ "$(realpath "$SRV_EXE")" != "$(realpath /usr/bin/python3)" ]; then
+            echo "note: service interpreter is $SRV_EXE, documented default is /usr/bin/python3"
+          fi
+          echo "OK: real systemd, active, running as $SRV_USER (non-root)"
+
+      - name: E2E API against the systemd-managed service
+        run: |
+          python3 scripts/e2e-api.py full \
+            "http://127.0.0.1:$PROD_PORT" e2e@example.com ci-e2e-token-abc123 \
+            /tmp/e2e-systemd-state.json "$Y8Y_HOME"
+
+      - name: Restart via systemd and verify persistence
+        run: |
+          sudo systemctl restart y8y-todo
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:$PROD_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) echo "restarted (HTTP $code)"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;;
+            *) echo "restart failed"
+               sudo journalctl -u y8y-todo --no-pager -n 50 || true
+               exit 1;;
+          esac
+          PID="$(systemctl show -p MainPID --value y8y-todo)"
+          echo "after restart: MainPID=$PID user=$(ps -o user= -p "$PID" | tr -d ' ')"
+          python3 scripts/e2e-api.py persist \
+            "http://127.0.0.1:$PROD_PORT" e2e@example.com ci-e2e-token-abc123 \
+            /tmp/e2e-systemd-state.json "$Y8Y_HOME"
+
+      - name: Stop via systemd and confirm inactive
+        run: |
+          sudo systemctl stop y8y-todo
+          sleep 2
+          STATE="$(systemctl show -p ActiveState --value y8y-todo)"
+          echo "ActiveState after stop: $STATE"
+          [ "$STATE" = "inactive" ] || { echo "service did not stop cleanly"; exit 1; }
+          echo "OK: stopped cleanly via systemd"
+
+      - name: Show journal on failure
+        if: failure()
+        run: sudo journalctl -u y8y-todo --no-pager -n 80 || true
+
+  browser-e2e:
+    name: Linux browser E2E (Ubuntu 24.04, real UI)
+    runs-on: ubuntu-24.04
+    env:
+      Y8Y_USER: e2euser
+      Y8Y_HOME: /home/e2euser
+      DEV_PORT: '8086'
+    steps:
+      - name: Checkout code (fresh clone from GitHub)
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Create dedicated non-root user and data dir
+        run: |
+          sudo useradd -m -s /bin/bash "$Y8Y_USER" || true
+          sudo mkdir -p "$Y8Y_HOME/dev-data"
+          sudo chown -R "$Y8Y_USER:$Y8Y_USER" "$Y8Y_HOME/dev-data"
+
+      - name: Pin the dev server to the job's Python
+        run: |
+          # 同 linux-e2e: sudo 的 secure_path 会抹掉 setup-python 的解释器,
+          # 'sudo -u e2euser python3' 会静默落到系统 python。
+          PYBIN="$(command -v python3)"
+          echo "job python: $PYBIN → $(python3 --version 2>&1)"
+          echo "what 'sudo -u $Y8Y_USER python3' would resolve to:"
+          sudo -u "$Y8Y_USER" bash -c 'command -v python3; python3 --version' || true
+          echo "PYBIN=$PYBIN" >> "$GITHUB_ENV"
+
+      - name: Install the app to /opt/y8y-todo (like the README)
+        run: |
+          sudo mkdir -p /opt/y8y-todo
+          sudo cp -r "$GITHUB_WORKSPACE"/. /opt/y8y-todo/
+          sudo chown -R "$Y8Y_USER:$Y8Y_USER" /opt/y8y-todo
+          sudo -u "$Y8Y_USER" test -r /opt/y8y-todo/src/serve.py
+
+      - name: Start dev-mode server as non-root user
+        run: |
+          sudo -u "$Y8Y_USER" bash -c "
+            cd /opt/y8y-todo
+            export Y8Y_DEV_MODE='1'
+            export Y8Y_DATA_DIR='$Y8Y_HOME/dev-data'
+            export Y8Y_PORT='$DEV_PORT'
+            nohup $PYBIN src/serve.py > /tmp/y8y-dev.log 2>&1 &
+            echo \$! > /tmp/y8y-dev.pid
+          "
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$DEV_PORT/todo/" || true)
+            case "$code" in 200) echo "dev server up"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200) ;; *) echo "dev server failed"; cat /tmp/y8y-dev.log; exit 1;; esac
+
+      - name: Verify dev server runs as non-root on the job's Python
+        run: |
+          PID="$(cat /tmp/y8y-dev.pid)"
+          SRV_USER="$(ps -o user= -p "$PID" | tr -d ' ')"
+          SRV_EXE="$(sudo readlink "/proc/$PID/exe")"
+          echo "dev server pid=$PID user=$SRV_USER interpreter=$SRV_EXE → $("$SRV_EXE" --version 2>&1)"
+          [ "$SRV_USER" = "$Y8Y_USER" ] || { echo "not running as $Y8Y_USER"; exit 1; }
+          [ "$(realpath "$SRV_EXE")" = "$(realpath "$PYBIN")" ] || {
+            echo "dev server is not on the job's Python"; exit 1; }
+          echo "OK: non-root on the job's Python 3.12"
+
+      - name: Install Playwright + Chromium (isolated venv)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install --quiet playwright
+          .venv/bin/playwright install --with-deps chromium
+
+      - name: Browser E2E — real UI operations
+        run: .venv/bin/python scripts/e2e-browser.py "http://127.0.0.1:$DEV_PORT"
+
+      - name: Show server log on failure
+        if: failure()
+        run: tail -50 /tmp/y8y-dev.log 2>/dev/null || true
+
+  # ─────────────────────────────────────────────────────────────
+  # CI Gate — 稳定名称的汇总检查
+  #
+  #   Ruleset 的 Required Status Checks 只配这 4 个名字:
+  #     gate / pytest   gate / ubuntu   gate / e2e   gate / upgrade
+  #   内部测试 job 怎么增删改名, Ruleset 都不用动。
+  #
+  # ⚠️ 机制 (别简化):
+  #   · needs  —— 本 workflow 的**全部**测试 job
+  #   · if: always() —— 上游失败时本 job 仍然跑。
+  #     没有它: 上游失败 → 本 job 被 skip → GitHub 把 skipped 当成
+  #     「已满足 Required Check」→ 门形同虚设。
+  #   · 判定 —— 显式检查每个 needs.<job>.result, 任何非 success
+  #     (failure / cancelled / skipped) 都让本 job **失败**。
+  #     必须是 failure 而不是 skipped。
+  #
+  # 维护: 新增/删除/重命名内部测试 job 时, 同步改下面的 needs
+  # (见 AGENTS.md §4.1)。判定逻辑在 scripts/ci-gate-check.sh, 四处共用。
+  # ─────────────────────────────────────────────────────────────
+  gate-e2e:
+    name: gate / e2e
+    runs-on: ubuntu-latest
+    needs: [linux-e2e, systemd-e2e, browser-e2e]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - name: Aggregate upstream results
+        env:
+          RESULT_linuxe2e: ${{ needs.linux-e2e.result }}
+          RESULT_systemde2e: ${{ needs.systemd-e2e.result }}
+          RESULT_browsere2e: ${{ needs.browser-e2e.result }}
+        run: |
+          set -euo pipefail
+          upstream=""
+          upstream="$upstream linuxe2e=${RESULT_linuxe2e}"
+          upstream="$upstream systemde2e=${RESULT_systemde2e}"
+          upstream="$upstream browsere2e=${RESULT_browsere2e}"
+          echo "upstream: $upstream"
+          CI_GATE_UPSTREAM="$upstream" bash scripts/ci-gate-check.sh

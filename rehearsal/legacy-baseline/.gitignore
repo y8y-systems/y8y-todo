@@ -1,0 +1,61 @@
+# y8y todolist · monorepo · handoff .gitignore
+#
+# 此 .gitignore 来自生产项目,Step-5 Mac dev 接手后可能进一步收紧。
+# 重点: **未来 git add . 不会把以下误纳入** —— 即使本地数据家被软链 / 拷贝到工程目录。
+# ───────────────────────────────────────────────────────────
+
+# ── 任务数据 (绝对不能进 git) ──
+*.md
+!README.md
+!README-LEGACY.md
+!SOURCE_HANDOFF.md
+!docs/*.md
+
+# ── 旧位置备份目录 ──
+_backup_*/
+.backup_*/
+backup/
+
+# ── Playwright 验证产物 ──
+_verify/
+*.png
+!vendor/y8y-shared-chrome/icons/ui/*.png
+!vendor/y8y-shared-chrome/fonts/*.woff2
+
+# ── Python 运行时 ──
+__pycache__/
+*.pyc
+*.pyo
+
+# ── 编辑器 / 系统 ──
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── 环境 / 日志 ──
+.env
+.env.local
+*.log
+logs/
+
+# ── 真实 OAuth / Token 文件(永远不能进 git)──
+google_calendar/client_secret.json
+google_calendar/tokens.json
+google_calendar/oauth_states.json
+google_calendar/settings.json
+internal_tokens.json
+persistent_projects.json
+
+# ── 数据家(开发用本地目录)──
+data/
+/data
+
+# ── 私人配置 / 临时笔记 ──
+*.bak
+*.bak-*
+*.head
+*.tar.gz
+*.tgz
+_snapshots*/

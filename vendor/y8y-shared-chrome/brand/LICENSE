@@ -1,0 +1,72 @@
+# y8y Brand Asset License
+
+Copyright (c) 2026 y8y-systems. All rights reserved.
+
+This license covers the official y8y brand assets in this directory —
+`y8y-logo.svg` (the master: a 19×19 pixel grid) and `favicon-48.png`
+(a bitmap fallback for browsers that do not render SVG favicons — Safari
+before version 26 does not). The app loads the vector master directly;
+the fallback is generated from it by `scripts/regen-brand-assets.py`
+(nearest-neighbour rescale, hard pixel edges); the artwork itself is
+unchanged. This license
+does **not** cover the software source code of this repository, which is
+licensed under the MIT License (see the repository root `LICENSE`), and it
+does not cover the UI icons (Pixelarticons, MIT — see
+`../icons/PIXELARTICONS-LICENSE.txt`).
+
+## 1. Permitted without asking
+
+1. **Run and display.** Download, install and run the official y8y Todo and
+   let it display the official logo as shipped.
+2. **Redistribute the unmodified official software.** Copy and share the
+   official software, logo included, provided you do not modify it and you
+   keep this license file together with the logo.
+3. **Forks and technical copies.** Forking this repository copies the logo
+   file together with the MIT-licensed code; that technical copy is
+   permitted. The MIT License governs the code; this license governs the
+   logo.
+4. **Describe and reference.** Use the logo in accurate, truthful material
+   about the official project: articles, tutorials, reviews, screenshots,
+   and provenance notes such as "Based on y8y Todo".
+
+## 2. Requires prior written permission
+
+1. Using the logo — or a confusingly similar variant — as the brand or
+   product identity of your own product, service, company or project,
+   including modified distributions of this software (which should carry
+   their own branding).
+2. Making or selling merchandise or products that feature the logo.
+3. Selling, sublicensing or redistributing the logo itself as a standalone
+   asset, including inside asset packs or template bundles.
+4. Using the logo in a way that implies official endorsement,
+   certification, authorization or affiliation, or that impersonates the
+   official project or organization.
+
+## 3. Conditions that always apply
+
+- Do not modify the logo artwork: no recoloring, redrawing, re-tracing,
+  cropping, stretching, CSS filters or tiling. Keep its aspect ratio and
+  clear space.
+- Keep this license file with the logo wherever it is redistributed as
+  part of the official software.
+- The master shipped here is the owner's original SVG export, byte-identical.
+  The PNG renditions are generated from it without changing the artwork.
+  Modified logo files are not covered by this license.
+
+## 4. No trademark grant
+
+This license grants a limited copyright permission to copy and distribute
+the logo as described above. It does **not** grant any right to the "y8y"
+name or to any trademark, and no trademark registration is claimed by this
+document. Brand identity and ownership remain with the rights holder.
+
+## 5. No warranty
+
+The logo is provided "as is", without warranty of any kind, express or
+implied.
+
+## 6. Relationship to the MIT License
+
+Nothing in this license limits the rights the MIT License grants you for
+the software source code. The restrictions here apply to the brand assets
+only.

@@ -1,0 +1,40 @@
+# NOTICE
+
+This repository contains material under several different licenses. This
+file maps what is under what; the individual license files remain
+authoritative.
+
+## Software source code — MIT License
+
+`src/`, `tests/`, `scripts/`, `docs/`, `packaging/`, `rehearsal/` and the
+repository's other code and documentation are licensed under the MIT
+License — see [LICENSE](LICENSE). Copyright (c) 2026 y8y-systems.
+
+## Official y8y branding and logos — separately licensed
+
+The official y8y logo (`vendor/y8y-shared-chrome/brand/y8y-logo.svg`,
+plus the `favicon-48.png` fallback generated from it) is
+**not** covered by the MIT License. It is an in-house brand asset shipped
+under the y8y Brand Asset License — see
+[vendor/y8y-shared-chrome/brand/LICENSE](vendor/y8y-shared-chrome/brand/LICENSE)
+and [BRANDING.md](BRANDING.md) for the usage rules.
+
+Distributing the logo together with the official software does not
+transfer brand ownership. Statements about trademarks, endorsement or
+official affiliation are governed separately from the software license.
+
+## Third-party assets — their own licenses
+
+- UI icons (`vendor/y8y-shared-chrome/icons/`): Pixelarticons by Gerrit
+  Halfmann, MIT License — full text and mapping in
+  [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+- UI font (`vendor/y8y-shared-chrome/fonts/`): Fusion Pixel Font by TakWolf,
+  SIL Open Font License 1.1 — the license text ships next to the font files,
+  and version, source URLs and SHA256 checksums are recorded in
+  `vendor/y8y-shared-chrome/fonts/SOURCES.txt`. Full details in
+  [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
+The MIT License covers this project's own source code only. The font and the
+icons keep their own licenses and are **not** MIT-licensed; the application
+may be used, copied, deployed and commercially used under the MIT License
+while the font continues to be governed by the OFL.

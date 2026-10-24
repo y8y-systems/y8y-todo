@@ -1,0 +1,453 @@
+name: ubuntu-2204
+
+# P5.5: 真实目标平台验证 (Ubuntu 22.04 / Python 3.10 / systemd 249)。
+# P3/P4 的 E2E 都在 24.04 上跑; 生产 VPS 是 22.04, 这里补上真实目标
+# 平台的证据, 不用 24.04 的结果代替 22.04:
+#   pytest-310        — 全套测试跑在系统 Python 3.10 上
+#   systemd-249       — 打包的 unit 在真 systemd 249 下完整生命周期
+#                       (非 root / 独立数据目录 / 重启持久 / 停止干净)
+#   standalone-python — uv 独立 Python 3.12 runtime, 不动系统 Python,
+#                       服务以该解释器运行 (proc/<pid>/exe 核对)
+#   browser-2204      — 真实 Chromium 打 22.04 上的服务
+on:
+  pull_request:
+    branches:
+      - main
+      - 'feature/**'
+  push:
+    branches:
+      - main
+      - 'feature/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest-310:
+    name: pytest (Ubuntu 22.04, system Python 3.10)
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Show environment facts
+        run: |
+          echo "system python3: $(command -v python3) → $(python3 --version 2>&1)"
+          echo "/usr/bin/python3: $(/usr/bin/python3 --version 2>&1)"
+          python3 -c "import sys; assert sys.version_info[:2] == (3, 10), sys.version"
+
+      - name: Install pytest (user site; system Python untouched)
+        run: |
+          python3 -m pip install --user --quiet 'pytest>=7.0,<9.0' 'fonttools[woff]>=4.40'
+          python3 -m pytest --version
+
+      - name: Run the full suite on Python 3.10
+        env:
+          # 字体覆盖测试不许静默跳过 (没装 fonttools 就必须红)
+          Y8Y_REQUIRE_FONT_TOOLS: '1'
+        run: |
+          set -euo pipefail
+          python3 -m pytest --basetemp=.pytest-tmp -q --tb=short 2>&1 | tee pytest-output.txt
+          TEST_RC=${PIPESTATUS[0]}
+          echo "::notice::pytest exit code: $TEST_RC"
+          exit $TEST_RC
+
+      - name: Upload pytest output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output-2204
+          path: pytest-output.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
+  systemd-249:
+    name: Linux systemd E2E (Ubuntu 22.04, systemd 249, packaged unit, non-root)
+    runs-on: ubuntu-22.04
+    env:
+      Y8Y_USER: y8y
+      Y8Y_HOME: /var/lib/y8y-todo
+      PROD_PORT: '8086'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Assert the target platform facts (systemd 249 + Python 3.10)
+        run: |
+          systemctl --version | head -1
+          systemd_ver=$(systemctl --version | head -1 | awk '{print $2}')
+          echo "systemd: $systemd_ver"
+          [ "$systemd_ver" = "249" ] || { echo "expected systemd 249 on ubuntu-22.04, got $systemd_ver"; exit 1; }
+          /usr/bin/python3 --version
+          /usr/bin/python3 -c "import sys; assert sys.version_info[:2] == (3, 10), sys.version"
+
+      - name: Create the dedicated non-root service user (as documented)
+        run: |
+          sudo useradd --system --user-group -d "$Y8Y_HOME" \
+            --shell /usr/sbin/nologin "$Y8Y_USER" || true
+          sudo mkdir -p "$Y8Y_HOME"
+          sudo chown "$Y8Y_USER:$Y8Y_USER" "$Y8Y_HOME"
+          id "$Y8Y_USER"
+          test "$(id -u "$Y8Y_USER")" -ne 0 || { echo "must not be root"; exit 1; }
+
+      - name: Install the code to /opt/y8y-todo (root-owned, world-readable)
+        run: |
+          sudo mkdir -p /opt/y8y-todo
+          sudo cp -r "$GITHUB_WORKSPACE"/. /opt/y8y-todo/
+          sudo chown -R root:root /opt/y8y-todo
+          sudo chmod -R a+rX /opt/y8y-todo
+          sudo -u "$Y8Y_USER" test -r /opt/y8y-todo/src/serve.py
+          /usr/bin/python3 -c "compile(open('/opt/y8y-todo/src/serve.py', encoding='utf-8').read(), 'serve.py', 'exec')"
+
+      - name: Write the environment file (fictional identity)
+        run: |
+          sudo mkdir -p /etc/y8y-todo
+          sudo cp /opt/y8y-todo/packaging/y8y-todo.env.example /etc/y8y-todo/y8y-todo.env
+          sudo chmod 600 /etc/y8y-todo/y8y-todo.env
+          sudo sed -i 's|^Y8Y_USERS=.*|Y8Y_USERS=e2e@example.com=e2e|' \
+            /etc/y8y-todo/y8y-todo.env
+          echo '{"e2e": "ci-e2e-token-abc123"}' \
+            | sudo tee "$Y8Y_HOME/internal_tokens.json" > /dev/null
+          sudo chown "$Y8Y_USER:$Y8Y_USER" "$Y8Y_HOME/internal_tokens.json"
+          sudo chmod 600 "$Y8Y_HOME/internal_tokens.json"
+
+      - name: Install the packaged unit and verify it statically
+        run: |
+          sudo cp /opt/y8y-todo/packaging/y8y-todo.service \
+            /etc/systemd/system/y8y-todo.service
+          systemd-analyze verify /etc/systemd/system/y8y-todo.service
+          echo "static unit verification passed (systemd-analyze verify)"
+
+      - name: Start the service with real systemd (system python 3.10)
+        run: |
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now y8y-todo
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:$PROD_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) echo "service up (HTTP $code)"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;;
+            *) echo "service failed to start under systemd"
+               sudo journalctl -u y8y-todo --no-pager -n 50 || true
+               exit 1;;
+          esac
+          echo "is-active: $(systemctl is-active y8y-todo)"
+
+      - name: Verify user, interpreter (3.10) and sandbox under systemd
+        run: |
+          [ "$(systemctl show -p ActiveState --value y8y-todo)" = "active" ] \
+            || { echo "unit is not active"; sudo journalctl -u y8y-todo --no-pager -n 30 || true; exit 1; }
+          PID="$(systemctl show -p MainPID --value y8y-todo)"
+          SRV_USER="$(ps -o user= -p "$PID" | tr -d ' ')"
+          SRV_EXE="$(sudo readlink "/proc/$PID/exe")"
+          echo "MainPID=$PID user=$SRV_USER interpreter=$SRV_EXE → $("$SRV_EXE" --version 2>&1)"
+          [ "$SRV_USER" = "$Y8Y_USER" ] || { echo "not running as $Y8Y_USER"; exit 1; }
+          [ "$(realpath "$SRV_EXE")" = "$(realpath /usr/bin/python3)" ] || {
+            echo "service is not on the system python3"; exit 1; }
+          # systemd 沙箱: 数据目录可读写, ProtectHome 不影响 /var/lib
+          sudo -u "$Y8Y_USER" test -w "$Y8Y_HOME" || { echo "data dir not writable"; exit 1; }
+          echo "OK: systemd 249 + non-root + system Python 3.10"
+
+      - name: UI served (HTTP-level smoke)
+        run: |
+          code=$(curl -s --noproxy '*' -o /tmp/ui.html -w '%{http_code}' "http://127.0.0.1:$PROD_PORT/todo/")
+          [ "$code" = "200" ] || { echo "UI not served: $code"; exit 1; }
+          grep -q 'viewTabCalendar' /tmp/ui.html || { echo "UI page unexpected"; exit 1; }
+          echo "UI OK ($(wc -c < /tmp/ui.html) bytes)"
+
+      - name: E2E API against the systemd-managed service
+        run: |
+          python3 scripts/e2e-api.py full \
+            "http://127.0.0.1:$PROD_PORT" e2e@example.com ci-e2e-token-abc123 \
+            /tmp/e2e-state.json "$Y8Y_HOME"
+
+      - name: Restart via systemd and verify persistence
+        run: |
+          sudo systemctl restart y8y-todo
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:$PROD_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) echo "restarted (HTTP $code)"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;;
+            *) echo "restart failed"; sudo journalctl -u y8y-todo --no-pager -n 50 || true; exit 1;;
+          esac
+          PID="$(systemctl show -p MainPID --value y8y-todo)"
+          echo "after restart: MainPID=$PID user=$(ps -o user= -p "$PID" | tr -d ' ')"
+          python3 scripts/e2e-api.py persist \
+            "http://127.0.0.1:$PROD_PORT" e2e@example.com ci-e2e-token-abc123 \
+            /tmp/e2e-state.json "$Y8Y_HOME"
+
+      - name: Stop via systemd and confirm inactive
+        run: |
+          sudo systemctl stop y8y-todo
+          sleep 2
+          STATE="$(systemctl show -p ActiveState --value y8y-todo)"
+          echo "ActiveState after stop: $STATE"
+          [ "$STATE" = "inactive" ] || { echo "service did not stop cleanly"; exit 1; }
+          echo "OK: stopped cleanly via systemd"
+
+      - name: Staging-instance pattern (Runbook §4) on the same host
+        run: |
+          # 复刻 Runbook §4.2 的 sed 链: 独立 env + unit, 仅数据目录/端口不同。
+          # 同时验证 ReadWritePaths 必须同步改 — 这是文档明确标注的坑。
+          STAGING_DIR="$Y8Y_HOME-staging"
+          sudo mkdir -p "$STAGING_DIR"
+          sudo chown "$Y8Y_USER:$Y8Y_USER" "$STAGING_DIR"
+          sudo cp /opt/y8y-todo/packaging/y8y-todo.env.example /etc/y8y-todo/y8y-todo-staging.env
+          sudo chmod 600 /etc/y8y-todo/y8y-todo-staging.env
+          sudo sed -i "s|^Y8Y_DATA_DIR=.*|Y8Y_DATA_DIR=$STAGING_DIR|" /etc/y8y-todo/y8y-todo-staging.env
+          sudo sed -i "s|^Y8Y_PORT=.*|Y8Y_PORT=18086|" /etc/y8y-todo/y8y-todo-staging.env
+          sudo cp /opt/y8y-todo/packaging/y8y-todo.service /etc/systemd/system/y8y-todo-staging.service
+          sudo sed -i "s|EnvironmentFile=/etc/y8y-todo/y8y-todo.env|EnvironmentFile=/etc/y8y-todo/y8y-todo-staging.env|" \
+            /etc/systemd/system/y8y-todo-staging.service
+          sudo sed -i "s|^ReadWritePaths=.*|ReadWritePaths=$STAGING_DIR|" \
+            /etc/systemd/system/y8y-todo-staging.service
+          systemd-analyze verify /etc/systemd/system/y8y-todo-staging.service
+          sudo systemctl daemon-reload && sudo systemctl enable --now y8y-todo-staging
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:18086/todo/api/tasks" || true)
+            case "$code" in 200|401) echo "staging up (HTTP $code)"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;;
+            *) echo "staging instance failed"; sudo journalctl -u y8y-todo-staging --no-pager -n 50 || true; exit 1;;
+          esac
+          ss -tln | grep 18086
+          PID="$(systemctl show -p MainPID --value y8y-todo-staging)"
+          echo "staging pid=$PID user=$(ps -o user= -p "$PID" | tr -d ' ')"
+          sudo systemctl stop y8y-todo-staging
+          echo "OK: staging pattern (Runbook §4) works on systemd 249"
+
+      - name: Show journal on failure
+        if: failure()
+        run: sudo journalctl -u y8y-todo --no-pager -n 80 || true
+
+  standalone-python:
+    name: Ubuntu 22.04 + standalone Python 3.12 (uv runtime, non-root)
+    runs-on: ubuntu-22.04
+    env:
+      Y8Y_USER: y8y
+      Y8Y_HOME: /var/lib/y8y-todo
+      PROD_PORT: '8087'
+      UV_VERSION: '0.11.30'
+      PYTHON_VERSION: '3.12'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv (pinned) and a standalone CPython 3.12
+        run: |
+          curl -LsSf "https://astral.sh/uv/$UV_VERSION/install.sh" | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv --version
+          # 独立安装目录, root 拥有、全局可读 → 服务用户可直接执行,
+          # 不动系统 Python, 不影响其他服务。
+          # 安装用 sudo (运维员动作); 产物全局可执行 (服务用户无需写权限)。
+          sudo mkdir -p /opt/uv-python
+          sudo chmod 755 /opt/uv-python
+          sudo env UV_PYTHON_INSTALL_DIR=/opt/uv-python "$HOME/.local/bin/uv" \
+            python install "$PYTHON_VERSION"
+          PYBIN="$(UV_PYTHON_INSTALL_DIR=/opt/uv-python uv python find "$PYTHON_VERSION")"
+          echo "standalone interpreter: $PYBIN → $("$PYBIN" --version 2>&1)"
+          "$PYBIN" -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
+          echo "PYBIN=$PYBIN" >> "$GITHUB_ENV"
+          # 系统 python3 未被触碰
+          /usr/bin/python3 -c "import sys; assert sys.version_info[:2] == (3, 10), sys.version"
+
+      - name: Create the service user and install the code
+        run: |
+          sudo useradd --system --user-group -d "$Y8Y_HOME" \
+            --shell /usr/sbin/nologin "$Y8Y_USER" || true
+          sudo mkdir -p "$Y8Y_HOME"
+          sudo chown "$Y8Y_USER:$Y8Y_USER" "$Y8Y_HOME"
+          sudo mkdir -p /opt/y8y-todo
+          sudo cp -r "$GITHUB_WORKSPACE"/. /opt/y8y-todo/
+          sudo chown -R root:root /opt/y8y-todo
+          sudo chmod -R a+rX /opt/y8y-todo
+          sudo -u "$Y8Y_USER" test -x "$PYBIN" || { echo "service user cannot execute $PYBIN"; exit 1; }
+
+      - name: Environment file + fictional token
+        run: |
+          sudo mkdir -p /etc/y8y-todo
+          sudo cp /opt/y8y-todo/packaging/y8y-todo.env.example /etc/y8y-todo/y8y-todo.env
+          sudo chmod 600 /etc/y8y-todo/y8y-todo.env
+          sudo sed -i 's|^Y8Y_USERS=.*|Y8Y_USERS=e2e@example.com=e2e|' /etc/y8y-todo/y8y-todo.env
+          sudo sed -i 's|^Y8Y_PORT=.*|Y8Y_PORT=8087|' /etc/y8y-todo/y8y-todo.env
+          echo '{"e2e": "ci-e2e-token-abc123"}' | sudo tee "$Y8Y_HOME/internal_tokens.json" > /dev/null
+          sudo chown "$Y8Y_USER:$Y8Y_USER" "$Y8Y_HOME/internal_tokens.json"
+
+      - name: Unit with the standalone interpreter (what the runbook documents)
+        run: |
+          # 与打包 unit 相同, 只把 ExecStart 换成独立解释器 (documented option B)
+          sudo cp /opt/y8y-todo/packaging/y8y-todo.service /etc/systemd/system/y8y-todo.service
+          sudo sed -i "s|^ExecStart=.*|ExecStart=$PYBIN /opt/y8y-todo/src/serve.py|" /etc/systemd/system/y8y-todo.service
+          grep '^ExecStart=' /etc/systemd/system/y8y-todo.service
+          systemd-analyze verify /etc/systemd/system/y8y-todo.service
+
+      - name: Start under real systemd on the standalone Python
+        run: |
+          sudo systemctl daemon-reload
+          sudo systemctl enable --now y8y-todo
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:$PROD_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) echo "service up (HTTP $code)"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200|401) ;;
+            *) echo "standalone-python service failed"; sudo journalctl -u y8y-todo --no-pager -n 50 || true; exit 1;;
+          esac
+
+      - name: Verify the running process is the standalone 3.12
+        run: |
+          PID="$(systemctl show -p MainPID --value y8y-todo)"
+          SRV_USER="$(ps -o user= -p "$PID" | tr -d ' ')"
+          SRV_EXE="$(sudo readlink "/proc/$PID/exe")"
+          echo "MainPID=$PID user=$SRV_USER interpreter=$SRV_EXE → $("$SRV_EXE" --version 2>&1)"
+          [ "$SRV_USER" = "$Y8Y_USER" ] || { echo "not running as $Y8Y_USER"; exit 1; }
+          [ "$(realpath "$SRV_EXE")" = "$(realpath "$PYBIN")" ] || {
+            echo "service interpreter is not the standalone python"; exit 1; }
+          "$SRV_EXE" -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
+          echo "OK: non-root on standalone CPython 3.12 (system python untouched)"
+
+      - name: E2E API + restart persistence on the standalone runtime
+        run: |
+          python3 scripts/e2e-api.py full \
+            "http://127.0.0.1:$PROD_PORT" e2e@example.com ci-e2e-token-abc123 \
+            /tmp/e2e-state.json "$Y8Y_HOME"
+          sudo systemctl restart y8y-todo
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:$PROD_PORT/todo/api/tasks" || true)
+            case "$code" in 200|401) break;; esac
+            sleep 1
+          done
+          python3 scripts/e2e-api.py persist \
+            "http://127.0.0.1:$PROD_PORT" e2e@example.com ci-e2e-token-abc123 \
+            /tmp/e2e-state.json "$Y8Y_HOME"
+
+      - name: Stop cleanly
+        run: |
+          sudo systemctl stop y8y-todo
+          sleep 2
+          [ "$(systemctl show -p ActiveState --value y8y-todo)" = "inactive" ] || {
+            echo "service did not stop cleanly"; exit 1; }
+
+      - name: Show journal on failure
+        if: failure()
+        run: sudo journalctl -u y8y-todo --no-pager -n 80 || true
+
+  browser-2204:
+    name: Linux browser E2E (Ubuntu 22.04, real Chromium)
+    runs-on: ubuntu-22.04
+    env:
+      Y8Y_USER: e2euser
+      Y8Y_HOME: /home/e2euser
+      DEV_PORT: '8086'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create dedicated non-root user and data dir
+        run: |
+          sudo useradd -m -s /bin/bash "$Y8Y_USER" || true
+          sudo mkdir -p "$Y8Y_HOME/dev-data"
+          sudo chown -R "$Y8Y_USER:$Y8Y_USER" "$Y8Y_HOME/dev-data"
+
+      - name: Pin the dev server to the system Python 3.10
+        run: |
+          PYBIN=/usr/bin/python3
+          "$PYBIN" -c "import sys; assert sys.version_info[:2] == (3, 10), sys.version"
+          sudo -u "$Y8Y_USER" "$PYBIN" --version >/dev/null || {
+            echo "the service user cannot execute $PYBIN"; exit 1; }
+          echo "PYBIN=$PYBIN" >> "$GITHUB_ENV"
+
+      - name: Install the app and start dev-mode as non-root
+        run: |
+          sudo mkdir -p /opt/y8y-todo
+          sudo cp -r "$GITHUB_WORKSPACE"/. /opt/y8y-todo/
+          sudo chown -R "$Y8Y_USER:$Y8Y_USER" /opt/y8y-todo
+          sudo -u "$Y8Y_USER" bash -c "
+            cd /opt/y8y-todo
+            export Y8Y_DEV_MODE='1'
+            export Y8Y_DATA_DIR='$Y8Y_HOME/dev-data'
+            export Y8Y_PORT='$DEV_PORT'
+            nohup $PYBIN src/serve.py > /tmp/y8y-dev.log 2>&1 &
+            echo \$! > /tmp/y8y-dev.pid
+          "
+          for i in $(seq 1 30); do
+            code=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$DEV_PORT/todo/" || true)
+            case "$code" in 200) echo "dev server up"; break;; esac
+            sleep 1
+          done
+          case "$code" in 200) ;; *) echo "dev server failed"; cat /tmp/y8y-dev.log; exit 1;; esac
+          PID="$(cat /tmp/y8y-dev.pid)"
+          echo "pid=$PID user=$(ps -o user= -p "$PID" | tr -d ' ') exe=$(sudo readlink /proc/$PID/exe)"
+
+      - name: Install Playwright + Chromium (isolated venv)
+        run: |
+          /usr/bin/python3 -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install --quiet playwright
+          .venv/bin/playwright install --with-deps chromium
+
+      - name: Browser E2E — real UI operations
+        run: .venv/bin/python scripts/e2e-browser.py "http://127.0.0.1:$DEV_PORT"
+
+      - name: Show server log on failure
+        if: failure()
+        run: tail -50 /tmp/y8y-dev.log 2>/dev/null || true
+
+  # ─────────────────────────────────────────────────────────────
+  # CI Gate — 稳定名称的汇总检查
+  #
+  #   Ruleset 的 Required Status Checks 只配这 4 个名字:
+  #     gate / pytest   gate / ubuntu   gate / e2e   gate / upgrade
+  #   内部测试 job 怎么增删改名, Ruleset 都不用动。
+  #
+  # ⚠️ 机制 (别简化):
+  #   · needs  —— 本 workflow 的**全部**测试 job
+  #   · if: always() —— 上游失败时本 job 仍然跑。
+  #     没有它: 上游失败 → 本 job 被 skip → GitHub 把 skipped 当成
+  #     「已满足 Required Check」→ 门形同虚设。
+  #   · 判定 —— 显式检查每个 needs.<job>.result, 任何非 success
+  #     (failure / cancelled / skipped) 都让本 job **失败**。
+  #     必须是 failure 而不是 skipped。
+  #
+  # 维护: 新增/删除/重命名内部测试 job 时, 同步改下面的 needs
+  # (见 AGENTS.md §4.1)。判定逻辑在 scripts/ci-gate-check.sh, 四处共用。
+  # ─────────────────────────────────────────────────────────────
+  gate-ubuntu:
+    name: gate / ubuntu
+    runs-on: ubuntu-latest
+    needs: [pytest-310, systemd-249, standalone-python, browser-2204]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - name: Aggregate upstream results
+        env:
+          RESULT_pytest310: ${{ needs.pytest-310.result }}
+          RESULT_systemd249: ${{ needs.systemd-249.result }}
+          RESULT_standalone: ${{ needs.standalone-python.result }}
+          RESULT_browser2204: ${{ needs.browser-2204.result }}
+        run: |
+          set -euo pipefail
+          upstream=""
+          upstream="$upstream pytest310=${RESULT_pytest310}"
+          upstream="$upstream systemd249=${RESULT_systemd249}"
+          upstream="$upstream standalone=${RESULT_standalone}"
+          upstream="$upstream browser2204=${RESULT_browser2204}"
+          echo "upstream: $upstream"
+          CI_GATE_UPSTREAM="$upstream" bash scripts/ci-gate-check.sh
