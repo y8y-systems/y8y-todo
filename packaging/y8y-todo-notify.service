@@ -1,0 +1,61 @@
+# y8y Todo 通知调度器 —— systemd 单元示例
+# (复制到 /etc/systemd/system/y8y-todo-notify.service)
+#
+# 原则 (与 y8y-todo.service 一致):
+#   - 以专用非 root 用户运行 (绝不用 root)
+#   - 凭据只出现在服务器的环境文件里, **永远不进仓库**
+#   - Type=oneshot —— 跑一次就退出, 由配套的 timer 周期性拉起
+#
+# 依赖的路径:
+#   /opt/y8y-todo/src/notify_runner.py  调度器入口 (代码, root 拥有, 只读)
+#   /etc/y8y-todo/y8y-todo.env          身份/数据目录配置 (与服务共用)
+#   /etc/y8y-todo/y8y-todo-notify.env   通知凭据 (仅本单元使用, root:root 600)
+#   /var/lib/y8y-todo                   数据目录 (写通知设置与投递状态)
+#
+# ⚠️ 为什么通知凭据单独放一个 env 文件:
+#   y8y-todo.service **不** 读这个文件 —— Web 进程拿不到 LINE token /
+#   Resend key。Web 端只看调度器发布的"能力表"(哪个用户能用哪个渠道),
+#   里面没有任何凭据。
+#
+# 安装:
+#   sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.service \
+#           /etc/systemd/system/y8y-todo-notify.service
+#   sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.timer \
+#           /etc/systemd/system/y8y-todo-notify.timer
+#   sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.env.example \
+#           /etc/y8y-todo/y8y-todo-notify.env
+#   sudo chmod 600 /etc/y8y-todo/y8y-todo-notify.env
+#   sudo -e /etc/y8y-todo/y8y-todo-notify.env
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now y8y-todo-notify.timer
+#
+# 想先看看会发什么 (不发送):
+#   sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
+#        /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+#
+# 想验证某个渠道的凭据:
+#   ... /opt/y8y-todo/src/notify_runner.py --test <用户id>
+[Unit]
+Description=y8y Todo notification scheduler (one-shot)
+After=network.target
+# 通知要访问外网 (LINE / Resend); 网络起来之后再跑
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=y8y
+Group=y8y
+WorkingDirectory=/opt/y8y-todo/src
+# 身份与数据目录 (与 Web 服务共用); 通知凭据单独一个文件, 只给本单元读。
+# 前缀 '-' = 文件不存在时不报错 (没配通知就完全不装这个单元)。
+EnvironmentFile=-/etc/y8y-todo/y8y-todo.env
+EnvironmentFile=-/etc/y8y-todo/y8y-todo-notify.env
+ExecStart=/usr/bin/python3 /opt/y8y-todo/src/notify_runner.py
+# 与主服务一致的加固: 唯一可写路径是数据目录
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/y8y-todo
+PrivateTmp=true
+# 单次运行不该无限拖住 —— 10 分钟还没结束就杀掉 (下次 timer 会再拉起)
+TimeoutStartSec=600
