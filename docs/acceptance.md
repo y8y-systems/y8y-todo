@@ -430,13 +430,17 @@ systemctl show -p User y8y-todo.service y8y-todo-notify.service
 #    → both "y8y"   ← this is the condition that makes the check below fail
 
 # 1. The scheduler must have hardened itself (PR_SET_DUMPABLE = 0).
+#    Linux 5.15's /proc/<pid>/status has NO "Dumpable" field, so the
+#    process must report it itself — the runner prints it on every run.
 sudo systemctl start y8y-todo-notify-dry-run.service
-PID=$(pgrep -f 'notify_runner.py' | head -1)
-sudo grep -E '^(Name|Uid|Dumpable)' /proc/$PID/status
-#    → "Dumpable: 0"
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 20 --no-pager | grep -o 'dumpable=[0-9]*'
+#    → dumpable=0        ← PASS (hardening active)
+#    → dumpable=1        ← FAIL: the escape hatch Y8Y_NOTIFY_KEEP_DUMPABLE=1
+#                           is set, or an old copy of src/procguard.py is running
 
 # 2. The decisive test: read the scheduler's environment as the web user.
 #    The shell that runs this must already be the web user.
+PID=$(pgrep -f 'notify_runner.py' | head -1)
 sudo -u y8y cat /proc/$PID/environ >/dev/null
 #    → cat: /proc/<pid>/environ: Permission denied   ← PASS
 #    → (contents printed)                              ← FAIL, escalate
@@ -460,8 +464,13 @@ sudo python3 /opt/y8y-todo/scripts/check-notify-isolation.py \
 #    → "C1 FAIL" means both units still share a user: see §5.2.7
 ```
 
-**Pass:** step 1 shows `Dumpable: 0`; step 2 is denied; step 3 still
+**Pass:** step 1 shows `dumpable=0`; step 2 is denied; step 3 still
 reads; step 4 shows no credential file in the web unit; step 5 exits 0.
+
+Note: Linux 5.15 (the Ubuntu 22.04 kernel) has **no** `Dumpable` field
+in `/proc/<pid>/status` — checked against `fs/proc/array.c` v5.15 — so
+the dumpable state has to be read from the process's own output, which
+is why the runner prints `dumpable=0` on every run.
 
 **Expected state today, before stage 2 (separate system user):**
 step 5 reports `C1 FAIL` and `C3 FAIL` — that is the known, documented

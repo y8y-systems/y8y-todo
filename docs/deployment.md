@@ -743,6 +743,12 @@ The last row matters: systemd's process supervision, `ps`, and the CI
 job that reads `/proc/<pid>/exe` keep working unchanged. Only
 `environ` and `mem` are affected.
 
+Linux 5.15's `/proc/<pid>/status` has no `Dumpable` field (checked
+against `fs/proc/array.c` v5.15), so the state cannot be read from
+another process — the scheduler therefore reports it itself: every run
+prints `dumpable=0` (or `dumpable=1` when the escape hatch is on) in
+the journal.
+
 Debugging escape hatch — set in the env file, no file or unit change
 needed:
 

@@ -41,6 +41,7 @@ from notifications import (                                          # noqa: E40
     redact_secrets,
 )
 from procguard import harden as harden_process                       # noqa: E402
+import procguard                                                     # noqa: E402
 
 
 def safe_text(config, text, limit=200):
@@ -137,9 +138,14 @@ def main(argv=None):
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         mode = 'dry-run' if args.dry_run else 'run'
+        # dumpable= 是给运维看的加固状态标记: 0 = 已加固 (同 UID 读不到
+        # environ), 1 = 未加固 (调试逃生阀开着), None = 取不到。
+        # journal 里 grep 一下就能确认加固在生效。
+        dumpable = procguard.dumpable()
         print(f'[notify] {mode} at {report["now"]} '
               f'{config.notification_summary()} '
-              f'data_dir={config.data_dir}')
+              f'data_dir={config.data_dir} '
+              f'dumpable={"unknown" if dumpable is None else dumpable}')
         for item in report.get('planned', []):
             print(f'  [plan] user={item["user"]} channel={item["channel"]} '
                   f'kind={item["kind"]} {item.get("task", "")}')
