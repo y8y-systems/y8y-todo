@@ -20,7 +20,6 @@ import os
 import re
 import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -458,13 +457,16 @@ def test_same_uid_can_read_an_unhardened_process_environ(tmp_path):
     env = dict(os.environ)
     env['Y8Y_NOTIFY_LINE_TOKEN'] = secret
 
-    control = _spawn_reader_probe('import time; time.sleep(30)', env)
+    control = _spawn_reader_probe(
+        'import time; print("ready", flush=True); time.sleep(30)', env)
     try:
-        time.sleep(0.3)               # 让子进程真正跑起来
-        if control.poll() is not None:
-            pytest.skip('对照探针进程提前退出 (exit=%s, 输出=%r) —— '
+        # 等探针自己说"ready" —— 它跑到这行就说明 exec 完成了, /proc 里的
+        # 环境区也已经就绪 (用固定 sleep 同步会在慢机器上偶发读到空内容)。
+        line = control.stdout.readline().strip()
+        if line != 'ready':
+            pytest.skip('对照探针进程提前退出 (输出=%r) —— '
                         '本环境无法复现"同 UID 可读 environ"这一前提'
-                        % (control.returncode, control.stdout.read()[:200]))
+                        % line[:200])
         status, blob = _read_environ_status(control.pid)
         if status == 'gone':
             pytest.skip('对照探针进程已经不在了 —— '
