@@ -115,9 +115,10 @@ the Web process never holds a LINE token or an API key:
 | `Y8Y_NOTIFY_CATCHUP_HOURS` | `24` | how long after the due time a missed reminder may still be sent |
 | `Y8Y_NOTIFY_RETENTION_DAYS` | `30` | how long delivery state is kept before it is pruned |
 | `Y8Y_NOTIFY_TIMEOUT` | `15` | per-request timeout (seconds) when calling the provider API |
+| `Y8Y_NOTIFY_KEEP_DUMPABLE` | *(off)* | debug only — keep the scheduler dumpable (core dumps / `gdb`); normally it hardens itself so a same-UID process cannot read its environment |
 
 See [Notifications](#notifications-v1) below and
-[docs/deployment.md](docs/deployment.md) §5.1.
+[docs/deployment.md](docs/deployment.md) §5.1 and §5.2.
 
 ## Python runtime
 
@@ -225,6 +226,14 @@ the digest time.
   and shared tasks are delivered once per entitled user.
 - Messages are plain text (no HTML), so task titles cannot inject markup
   into a mail client or a LINE message.
+- The scheduler **hardens its own process** at startup
+  (`prctl(PR_SET_DUMPABLE, 0)`): a same-UID process — for example a
+  compromised web service — cannot read the scheduler's
+  `/proc/<pid>/environ`, so the credentials stay inside the process
+  that needs them. Every run reports `dumpable=0` in the journal. For
+  the full isolation analysis (and why the web and the scheduler should
+  eventually run as two different system users), see
+  [docs/deployment.md](docs/deployment.md) §5.2.
 
 ### Delivery guarantees
 
