@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -379,11 +380,25 @@ def _spawn_reader_probe(script, env):
 
 def _read_environ(pid):
     """读 /proc/<pid>/environ。返回 (是否读得到, 内容)。"""
+    status, blob = _read_environ_status(pid)
+    return status == 'read', blob
+
+
+def _read_environ_status(pid):
+    """读 /proc/<pid>/environ。
+
+    返回 (状态, 内容):
+      'read'    —— 读到了 (同 UID 可以读别人的 environ)
+      'denied'  —— EACCES (内核拒绝了 —— 加固生效, 或同 UID 之外的隔离)
+      'gone'    —— 进程已经不在了 (探针没跑起来)
+    """
     try:
         with open(f'/proc/{pid}/environ', 'rb') as f:
-            return True, f.read()
-    except (PermissionError, FileNotFoundError, ProcessLookupError):
-        return False, b''
+            return 'read', f.read()
+    except PermissionError:
+        return 'denied', b''
+    except (FileNotFoundError, ProcessLookupError):
+        return 'gone', b''
 
 
 @pytest.mark.skipif(not sys.platform.startswith('linux'),
@@ -409,8 +424,9 @@ def test_hardened_scheduler_environ_is_unreadable_by_the_same_uid(tmp_path):
             # 与 test_harden_respects_the_debug_escape_hatch 直接断言。
             pytest.skip(f'探针进程没能在本环境启动, 无法做 /proc 实测 (输出: {line[:200]!r})')
 
-        readable, _blob = _read_environ(hardened.pid)
-        assert not readable, '加固后的调度器 environ 仍被同 UID 读到'
+        status, _blob = _read_environ_status(hardened.pid)
+        assert status == 'denied', (
+            f'加固后的调度器 environ 仍被同 UID 读到 (状态={status})')
         # 内存同样读不到
         try:
             with open(f'/proc/{hardened.pid}/mem', 'rb') as f:
@@ -433,8 +449,9 @@ def test_hardened_scheduler_environ_is_unreadable_by_the_same_uid(tmp_path):
 def test_same_uid_can_read_an_unhardened_process_environ(tmp_path):
     """前提: 不加固的话, 同 UID 确实能读到别人的 environ (这就是那个洞)。
 
-    这个前提跟运行环境有关 —— 某些 CI 沙箱对 /proc 读得比正常系统更严,
-    那时跳过而不是假装通过。真正的判定在目标宿主上做
+    这个前提跟运行环境有关 —— 某些 CI 沙箱对 /proc 的视图与真实内核
+    不同 (读回来的 environ 是空的), 那时跳过并把诊断信息写进跳过原因,
+    而不是把环境差异报成"安全断言失败"。真正的判定在目标宿主上做
     (docs/acceptance.md §9.3)。
     """
     secret = 'PROC_TEST_SECRET_TOKEN_0123456789'
@@ -443,13 +460,22 @@ def test_same_uid_can_read_an_unhardened_process_environ(tmp_path):
 
     control = _spawn_reader_probe('import time; time.sleep(30)', env)
     try:
+        time.sleep(0.3)               # 让子进程真正跑起来
         if control.poll() is not None:
-            pytest.skip('对照探针进程提前退出, 本环境复现不了"同 UID 可读 environ"')
-        readable, blob = _read_environ(control.pid)
-        if not readable:
+            pytest.skip('对照探针进程提前退出 (exit=%s, 输出=%r) —— '
+                        '本环境无法复现"同 UID 可读 environ"这一前提'
+                        % (control.returncode, control.stdout.read()[:200]))
+        status, blob = _read_environ_status(control.pid)
+        if status == 'gone':
+            pytest.skip('对照探针进程已经不在了 —— '
+                        '本环境无法复现"同 UID 可读 environ"这一前提')
+        if status == 'denied':
             pytest.skip('当前环境对 /proc 的读取已额外收紧 (如 hidepid), '
                         '无法复现"同 UID 可读"这一前提')
-        assert secret.encode() in blob, '对照前提不成立: 同 UID 竟读不到 environ'
+        if secret.encode() not in blob:
+            pytest.skip('同 UID 读到了 environ, 但里面没有预期的变量 '
+                        '(读回 %d 字节) —— 本环境的 /proc 视图与预期不同, '
+                        '不作为前提使用' % len(blob))
     finally:
         control.kill()
         control.wait()
