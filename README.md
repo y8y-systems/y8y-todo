@@ -35,6 +35,10 @@ markdown files, and there is no build step.
   `?view=...`
 - Drag tasks on the calendar to reschedule (with undo toast)
 - Chinese and Japanese holiday display (configurable per deployment)
+- Notifications (V1, opt-in): a separate scheduler delivers **LINE Messaging
+  API** and **email (Resend)** reminders — per-task "remind me N minutes
+  before" for tasks that carry a clock time, plus a **daily digest** for
+  all-day tasks; every user picks their own channels and times
 - Dark / light / auto theme
 - Pixel font: [Fusion Pixel](https://github.com/TakWolf/fusion-pixel-font)
   (OFL-1.1) is bundled with the app — no CDN, no network access needed at
@@ -94,6 +98,26 @@ secrets in the repo). Highlights:
 | `Y8Y_DEV_MODE` | *(off)* | single local user, forced loopback |
 
 Full reference: [docs/deployment.md](docs/deployment.md).
+
+### Notification variables (separate environment file)
+
+Notifications are **off by default** and read their own environment file, so
+the Web process never holds a LINE token or an API key:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `Y8Y_NOTIFY_ENABLED` | `0` | master switch for the whole notification subsystem |
+| `Y8Y_NOTIFY_LINE_TOKEN` | *(empty)* | LINE Messaging API channel access token |
+| `Y8Y_NOTIFY_LINE_TARGETS` | *(empty)* | `user=LINE-user-id,...` — who gets LINE |
+| `Y8Y_NOTIFY_EMAIL_API_KEY` | *(empty)* | Resend API key |
+| `Y8Y_NOTIFY_EMAIL_FROM` | *(empty)* | verified sender address |
+| `Y8Y_NOTIFY_EMAIL_TARGETS` | *(empty)* | `user=mail@example.com,...` — overrides the `Y8Y_USERS` address |
+| `Y8Y_NOTIFY_CATCHUP_HOURS` | `24` | how long after the due time a missed reminder may still be sent |
+| `Y8Y_NOTIFY_RETENTION_DAYS` | `30` | how long delivery state is kept before it is pruned |
+| `Y8Y_NOTIFY_TIMEOUT` | `15` | per-request timeout (seconds) when calling the provider API |
+
+See [Notifications](#notifications-v1) below and
+[docs/deployment.md](docs/deployment.md) §5.1.
 
 ## Python runtime
 
@@ -160,10 +184,112 @@ Why the pieces fit together:
   standalone interpreter (see the "Standalone Python" note in the
   unit and docs/deployment.md §5).
 
+## Notifications (V1)
+
+A **separate scheduler** delivers reminders. It is a one-shot program
+(`src/notify_runner.py`) driven by a systemd timer — not a daemon inside
+the web app — so a web restart never loses or duplicates a notification,
+and the scheduler can be scaled, paused or rolled back on its own.
+
+```
+src/serve.py        web app  ──▶ writes user preferences only
+src/notifications.py engine  ──▶ decides what to send, tracks delivery state
+src/notify_runner.py CLI    ──▶ one run, then exit (systemd timer)
+src/taskstore.py    shared task-file parsing (web + engine, one implementation)
+```
+
+### What gets sent
+
+| Task shape | Notification | When |
+| --- | --- | --- |
+| has `due` **and** `due_time` | single reminder | at `due_time` minus the user's *lead time* (default 30 min) |
+| all-day (no `due_time`) | part of the daily digest | once a day at the user's digest time (default 08:00) |
+
+The daily digest contains the user's all-day tasks due today **plus**
+their overdue tasks. A task that has a clock time is never repeated in
+the digest, and an all-day task is never point-reminded — the two
+channels do not overlap.
+
+Per user, under **Settings → Notifications** you can enable/disable
+notifications, pick the channels (LINE, email), set the lead time and
+the digest time.
+
+### Privacy
+
+- The web process **never** holds a LINE token or an email API key. The
+  scheduler publishes a credential-free *capability table*
+  (`notification_channels.json`) that says which user may use which
+  channel; the web app only reads that.
+- Only tasks the recipient may see are ever considered: a task owned by
+  another user is never included in somebody else's digest or reminder,
+  and shared tasks are delivered once per entitled user.
+- Messages are plain text (no HTML), so task titles cannot inject markup
+  into a mail client or a LINE message.
+
+### Delivery guarantees
+
+- Each reminder is keyed by *occurrence* (`user|owner|file|created|due`),
+  so changing a task's time produces a **new** reminder and the old
+  state becomes irrelevant; a task that is completed, deleted or rolled
+  forward by a recurring rule stops being reminded.
+- Delivery state is persisted, so a restart never re-sends a message
+  that already went out, and a task that was completed and later
+  restored is not reminded twice.
+- A failed delivery is retried with backoff (`5 · 2ⁿ` minutes, max 60,
+  at most 5 attempts). Permanent errors (4xx other than 408/425/429)
+  are not retried. A reminder that is missed by more than
+  `Y8Y_NOTIFY_CATCHUP_HOURS` is dropped instead of firing late.
+
+### Install (server side)
+
+```bash
+# 1. Units + env file (credentials stay on the server, root:root 600).
+sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.{service,timer} \
+        /etc/systemd/system/
+sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.env.example \
+        /etc/y8y-todo/y8y-todo-notify.env
+sudo chmod 600 /etc/y8y-todo/y8y-todo-notify.env
+sudo -e /etc/y8y-todo/y8y-todo-notify.env     # token / api key / targets
+
+# 2. Run the timer.
+sudo systemctl daemon-reload
+sudo systemctl enable --now y8y-todo-notify.timer
+systemctl list-timers y8y-todo-notify.timer
+```
+
+Check what *would* be sent without sending it, and verify the
+credentials of one channel:
+
+```bash
+sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
+     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+
+sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
+     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --test alice
+```
+
+If no channel is configured, the scheduler simply does nothing — the
+Todo app itself is unaffected.
+
+### New data files
+
+The notification system adds three **side-car** files in the data
+directory root. They are not part of the task format, no task file is
+ever rewritten, and removing them only resets notification preferences
+and history:
+
+| File | Contents |
+| --- | --- |
+| `notification_settings.json` | per-user preferences (channels, lead time, digest time) |
+| `notification_state.json` | delivery state — what was already sent, retry counters |
+| `notification_channels.json` | credential-free capability table written by the scheduler |
+
 ## Backups, restore, upgrades
 
 - **Backup**: the data directory is the whole state.
   `tar czf y8y-todo-$(date +%F).tar.gz -C /var/lib y8y-todo`
+  (this includes the notification side-car files, so restored
+  deployments do not re-send reminders that already went out)
 - **Restore**: stop the service, extract the archive, start again.
 - **Upgrade**: pull new code, restart the service. The on-disk format
   is additive and never rewritten by upgrades; historical Google
@@ -237,6 +363,14 @@ rule never silently strands a task in an invisible state.
 Removed-feature data (`owner: legacy-agent` etc.) is never deleted and is
 soft-hidden; see [docs/legacy-data.md](docs/legacy-data.md).
 
+Notification preferences and delivery history live in three **separate**
+JSON files in the data directory root (`notification_settings.json`,
+`notification_state.json`, `notification_channels.json`) — see
+[Notifications](#notifications-v1). They are additive side-cars: no task
+file, list file or frontmatter field is touched, and an older version of
+the app that knows nothing about notifications keeps working against the
+same data directory unchanged.
+
 ## Development
 
 **Working in this repo (human or AI agent)? Read [`AGENTS.md`](AGENTS.md) first** —
@@ -245,7 +379,7 @@ it is the entry point for the hard rules. The full how-to is in
 [`docs/release-process.md`](docs/release-process.md).
 
 ```bash
-python3 -m pytest --basetemp=.pytest-tmp    # 241 tests (9 Linux-only: host-check process identity + cutover/rollback state machine)
+python3 -m pytest --basetemp=.pytest-tmp    # 385 tests (9 Linux-only: host-check process identity + cutover/rollback state machine)
 ```
 
 The suite boots the real server on an ephemeral port with an isolated
@@ -258,6 +392,10 @@ historical fields preserved), backup/restore hardening
 (verify-before-write, same-filesystem staging, rollback on mid-write
 failure, the public-proxy token boundary), the destructive-E2E safety
 guard, and security regressions (path traversal, static guard).
+The notification subsystem has its own suite (`tests/test_notifications.py`):
+channel providers, per-user settings, delivery state, retry/backoff,
+idempotency, and the permission boundary (a private task of one user
+must never reach another user's digest).
 A browser-level verification script (`tests/browser_verify.py`, needs
 `pip install playwright` and a running dev server) additionally checks
 XSS rendering, same-title creation and renaming through the real UI.
@@ -267,7 +405,11 @@ XSS rendering, same-title creation and renaming through the real UI.
 `tests/browser_multiuser.py`, drives the real UI for **Alice and Bob
 through a stdlib authenticating proxy** (identity isolation, shared
 tasks, the Chinese-holiday preference toggle, list-ownership switching,
-and the public-proxy token boundary).
+and the public-proxy token boundary). A third script,
+`tests/browser_notify.py`, drives the **notification settings panel**
+in the real UI (toggle notifications, pick channels, set the lead time
+and the digest time, save, and reload to confirm the settings
+persisted and stayed scoped to that user).
 
 ### Production upgrade rehearsal (old ↔ new data compatibility)
 
@@ -328,12 +470,14 @@ rehearsal (fresh clone → install → non-root service → restart).
 
 ```
 src/            backend + frontend (serve.py, index.html, config.py)
+                + taskstore.py (shared task-file parsing)
+                + notifications.py (notification engine) + notify_runner.py (scheduler CLI)
 vendor/         vendored shared UI shell (tokens.css, icons, theme engine)
 vendor/y8y-shared-chrome/fonts/
                 bundled pixel font (Fusion Pixel, OFL-1.1) + its licenses
 tests/          pytest suite + legacy fixture + browser verification
 scripts/        E2E + P4 upgrade-rehearsal scripts (stdlib only)
-packaging/      systemd unit + env-file examples (non-root deployment)
+packaging/      systemd units + env-file examples (non-root deployment)
 docs/           deployment guide, generic upgrade runbook, legacy data guide
 AGENTS.md       hard rules entry point for every agent working in this repo
 docs/development.md       day-to-day dev loop, testing, PR template

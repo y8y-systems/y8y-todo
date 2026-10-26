@@ -406,6 +406,9 @@ jobs:
       - name: Browser E2E — real UI operations
         run: .venv/bin/python scripts/e2e-browser.py "http://127.0.0.1:$DEV_PORT"
 
+      - name: Browser E2E — notification settings panel
+        run: .venv/bin/python tests/browser_notify.py "http://127.0.0.1:$DEV_PORT"
+
       - name: Show server log on failure
         if: failure()
         run: tail -50 /tmp/y8y-dev.log 2>/dev/null || true

@@ -74,6 +74,9 @@ Agent 建的 PR 应当用**独立于人工审批者**的身份，这样评审才
 | `src/serve.py` | 后端全部逻辑（单文件 stdlib HTTP 服务） | 路径拼接一律走 `safe_join`；别硬编码绝对路径 |
 | `src/index.html` | 前端 SPA 全部（单文件 vanilla JS） | 输出到 HTML 的用户内容要 `escapeHtml`；`@media` 头别误删 |
 | `src/config.py` | 环境变量解析 | 新增变量要同步 `README.md` §Configuration + `packaging/y8y-todo.env.example` |
+| `src/taskstore.py` | 任务文件解析/写盘的纯函数（serve 与通知引擎共用） | 行为要跟旧实现逐字一致；改这里等于改数据格式 |
+| `src/notifications.py` | 通知引擎（渠道 provider、设置、投递状态、调度） | 纯 stdlib；凭据只从环境变量读，绝不写进 Web 端 |
+| `src/notify_runner.py` | 通知调度器 CLI（一次性，systemd timer 驱动） | 退出码 0/1 的语义别改；provider 失败不许崩 |
 | `vendor/y8y-shared-chrome/` | 共享 UI 壳（tokens/icons/字体/主题引擎） | 是 vendored 的上游副本，改动要考虑同步 |
 | `tests/` | pytest 套件 + 浏览器脚本 | 新功能先在 `tests/conftest.py` 看 fixture 怎么造数据 |
 | `rehearsal/legacy-baseline/` | 旧版行为快照（升级演练用） | **不要手改**——`MANIFEST.sha256` 是防篡改 tripwire，改了 CI 会红 |
@@ -103,6 +106,7 @@ Agent 建的 PR 应当用**独立于人工审批者**的身份，这样评审才
 | 列表 / 购物 / 项目 | `tests/test_lists.py` |
 | API 契约 | `tests/test_api_compat.py` |
 | 配置 / 数据目录 | `tests/test_config.py` `tests/test_data_dir.py` |
+| 通知系统 | `tests/test_notifications.py`（`tests/browser_notify.py` 跑 UI） |
 
 **改了认证、存储、API → 必须加对应回归测试**，不能只靠原有测试「顺便覆盖」。
 
@@ -111,6 +115,7 @@ UI 改动要跑浏览器脚本并截图：
 ```bash
 Y8Y_DEV_MODE=1 python3 src/serve.py &
 python3 tests/browser_verify.py            # 默认 18086，按实际端口覆盖
+python3 tests/browser_notify.py           # 通知设置面板（默认 8086）
 ```
 
 ---

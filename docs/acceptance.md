@@ -299,7 +299,89 @@ design** — browser traffic must never be able to carry it (§7 item 7).
 The JSON key must be a **local identity id** (the right-hand side of
 the `Y8Y_USERS` mapping, e.g. `alice`), never an e-mail.
 
-## 9. Run the full test suite and CI
+## 9. Notifications (optional, only if the deployment uses them)
+
+The notification subsystem is opt-in. If the deployment does not install
+`y8y-todo-notify.service` / `.timer`, **skip this section entirely** — the
+Todo app must be unaffected.
+
+> ⚠️ Use **fictional** recipients only. Do not point this at a real LINE
+> account or a real mailbox unless you intend to receive the messages.
+
+```bash
+# 0. Nothing is configured yet → the scheduler must be a no-op, and the
+#    app must not care.
+sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
+     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+#    → "notifications disabled (Y8Y_NOTIFY_ENABLED=0)"; exit code 0
+```
+
+```bash
+# 1. Master switch on, still no per-user opt-in → still nothing sent.
+sudo -e /etc/y8y-todo/y8y-todo-notify.env     # Y8Y_NOTIFY_ENABLED=1
+sudo systemctl restart y8y-todo-notify.service
+sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
+     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+#    → "no user has enabled notifications"; exit code 0
+```
+
+```bash
+# 2. The user opts in in the UI (Settings → Notifications): enable,
+#    pick a channel, set the lead time and the digest time, save.
+#    Then check what would be sent:
+sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
+     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+#    → "[plan] user=alice channel=line kind=reminder …"
+```
+
+```bash
+# 3. Credential check for one channel (does it actually deliver?).
+sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
+     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --test alice
+#    → "line: sent"
+```
+
+**Pass:** with the subsystem off the app behaves exactly as before; with
+it on but no user opt-in nothing is sent; after opting in the dry-run
+lists the expected reminders; `--test` confirms the credential works.
+
+### 9.1 Privacy checks (must all pass)
+
+```bash
+# a. The web service must NOT be able to read the notification credentials.
+sudo grep -c "EnvironmentFile" /etc/systemd/system/y8y-todo.service
+#    → must not mention y8y-todo-notify.env
+
+# b. The capability table the web app reads must contain no secrets.
+sudo python3 -c "import json;d=json.load(open('$DATA/notification_channels.json'));\
+print(json.dumps(d)[:2000])"
+#    → no token, no api key, no "secret"
+
+# c. Another user's private task must never appear in someone's digest.
+#    Create a private task owned by bob, then dry-run as alice:
+sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
+     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+#    → bob's private task title must not appear
+```
+
+**Pass:** (a) the web unit never reads the notify env file; (b) no
+credential material in the capability table; (c) no other user's private
+task in any plan.
+
+### 9.2 Idempotency and recovery
+
+```bash
+# Run twice in a row — the second run must not re-send anything.
+sudo systemctl start y8y-todo-notify.service
+sudo systemctl start y8y-todo-notify.service
+sudo python3 -c "import json;print(json.dumps(json.load(open('$DATA/notification_state.json')),indent=2))"
+#    → each occurrence appears exactly once, with its delivery status
+```
+
+**Pass:** a second run produces no duplicate send; the state file
+records the delivery, so a restart of the scheduler does not re-notify.
+
+## 10. Run the full test suite and CI
 
 ```bash
 python3 -m pytest --basetemp=.pytest-tmp -q     # all green (Linux-only
@@ -318,7 +400,7 @@ p4-upgrade-rehearsal.
 **Pass:** suite green locally; all CI checks green on the PR/commit
 under review.
 
-## 10. Report
+## 11. Report
 
 State for each section: PASS/FAIL, the exact commands that failed (if
 any), and anything unexpected (even if it did not fail). Use fictional

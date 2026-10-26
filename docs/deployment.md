@@ -63,6 +63,11 @@ is ever served unauthenticated.
 | `Y8Y_CN_HOLIDAYS` | `1` | master switch for the Chinese-holiday display in the calendar |
 | `Y8Y_CN_HOLIDAY_USERS` | *(empty = all)* | comma-separated identity ids that see Chinese holidays by default |
 
+The notification subsystem has **its own** variables, read only by the
+scheduler process — see [§ 5.1 Notifications](#51-notifications-optional).
+They are intentionally *not* in the table above: the web service must
+never be able to read a LINE token or an email API key.
+
 ### User mapping
 
 `Y8Y_USERS="alice@example.com=alice,bob@example.com=bob"` maps the
@@ -425,6 +430,111 @@ The `pytest` workflow runs the suite on Python 3.11 and 3.12; the
 platform** (Ubuntu 22.04, system Python 3.10, systemd 249): the pack-
 aged unit under real systemd, a standalone-Python variant, and the
 full pytest suite on the system interpreter.
+
+### 5.1 Notifications (optional)
+
+The notification subsystem is a **separate one-shot program** driven by
+its own systemd timer. It is off by default and completely optional —
+a deployment that never installs it behaves exactly as before.
+
+```
+/etc/systemd/system/y8y-todo-notify.service   ← Type=oneshot
+/etc/systemd/system/y8y-todo-notify.timer     ← every 5 minutes
+/etc/y8y-todo/y8y-todo-notify.env             ← credentials, root:root 600
+/opt/y8y-todo/src/notify_runner.py             ← the scheduler
+```
+
+#### Why a separate process and a separate env file
+
+The web service must never be able to read a LINE channel token or an
+email API key. The scheduler therefore owns the credentials, and it
+publishes a **credential-free capability table** (`notification_channels.json`)
+that says *which user may use which channel*. The web app reads only
+that file to render the settings panel.
+
+`y8y-todo.service` does **not** include `y8y-todo-notify.env` in its
+`EnvironmentFile=` list — only `y8y-todo-notify.service` does.
+
+#### Install
+
+```bash
+sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.service \
+        /etc/systemd/system/y8y-todo-notify.service
+sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.timer \
+        /etc/systemd/system/y8y-todo-notify.timer
+sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.env.example \
+        /etc/y8y-todo/y8y-todo-notify.env
+sudo chmod 600 /etc/y8y-todo/y8y-todo-notify.env   # root:root
+sudo -e /etc/y8y-todo/y8y-todo-notify.env          # fill in token / api key / targets
+sudo systemctl daemon-reload
+sudo systemctl enable --now y8y-todo-notify.timer
+```
+
+Both units read `/etc/y8y-todo/y8y-todo.env` as well (identity mapping
+and data directory), so the scheduler knows who the users are and where
+the tasks live.
+
+#### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `Y8Y_NOTIFY_ENABLED` | `0` | master switch; `0` = the scheduler does nothing at all |
+| `Y8Y_NOTIFY_LINE_TOKEN` | *(empty)* | LINE Messaging API channel access token |
+| `Y8Y_NOTIFY_LINE_TARGETS` | *(empty)* | `user=LINE-user-id,...` — per-user LINE recipient |
+| `Y8Y_NOTIFY_EMAIL_API_KEY` | *(empty)* | Resend API key |
+| `Y8Y_NOTIFY_EMAIL_FROM` | *(empty)* | sender address (a domain you verified with Resend) |
+| `Y8Y_NOTIFY_EMAIL_TARGETS` | *(empty)* | `user=mail@example.com,...`; empty = use the address from `Y8Y_USERS` |
+| `Y8Y_NOTIFY_CATCHUP_HOURS` | `24` | how long after the due time a missed reminder may still be sent |
+| `Y8Y_NOTIFY_RETENTION_DAYS` | `30` | how long delivery state is kept before it is pruned |
+| `Y8Y_NOTIFY_TIMEOUT` | `15` | per-request timeout in seconds |
+
+The `user` key in the target maps is the identity id from
+`Y8Y_USERS="email=id"` — not the email address.
+
+A **double opt-in**: `Y8Y_NOTIFY_ENABLED=1` only wakes the subsystem
+up; each user still has to enable notifications for themselves in
+**Settings → Notifications** and pick at least one channel. If a
+channel has no credentials, it is simply skipped — it never makes the
+Todo app error out.
+
+#### Verify before enabling
+
+```bash
+# What would be sent right now? (computes everything, sends nothing)
+sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
+     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+
+# Does the credential work for one user?
+sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
+     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --test alice
+
+# Logs
+journalctl -u y8y-todo-notify.service -n 50 --no-pager
+systemctl list-timers y8y-todo-notify.timer
+```
+
+`--dry-run` also prints the planned messages, so you can confirm the
+wording and the recipients before anything leaves the server.
+
+#### Operational notes
+
+- The timer runs every 5 minutes, so a reminder is delivered at most
+  ~5 minutes late. Set `AccuracySec=1min` (already in the packaged
+  timer) and systemd aligns the wake-up to whole minutes.
+- `Persistent=true` makes systemd run the missed tick once after a
+  reboot.
+- The scheduler never crashes on a provider error: a failed delivery is
+  recorded, retried with backoff (`5 · 2ⁿ` minutes, max 60, 5 attempts)
+  and finally marked as exhausted. Permanent 4xx errors (other than
+  408/425/429) are not retried.
+- A reminder whose due time is more than `Y8Y_NOTIFY_CATCHUP_HOURS` in
+  the past is dropped rather than delivered late — after a long outage
+  you get the daily digest, not a burst of stale reminders.
+- Delivery state is keyed by *occurrence* (user, owner, file, created
+  stamp, due date/time), so rescheduling a task produces a fresh
+  reminder while an unchanged task is never sent twice.
+- `notification_state.json` should be part of your backup: without it a
+  restored deployment would re-send reminders that already went out.
 
 ## 6. Upgrading from versions with Google Calendar
 

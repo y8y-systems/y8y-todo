@@ -79,6 +79,7 @@ git config --local user.email "y8y-systems@users.noreply.github.com"
 - ❌ 不为了小功能引入无关的大型重构（这项目是 stdlib-only + 无构建步骤，别破坏它）。
 - ✅ **保留数据格式兼容性。** 磁盘格式（frontmatter 字段、`done/<date>/`、`lists/<id>/`、
   `persistent_projects.json`）一旦发布就不能被静默改写；要改必须走数据迁移方案 + 升级 runbook。
+  新功能的偏好/状态一律用**旁挂文件**（如 `notification_settings.json`），不许塞进任务 frontmatter。
 - ✅ 改动**认证 / 存储 / API** 时，**必须**补对应回归测试（见 §4）。
 - ⚠️ 与生产部署有关的任何操作，需要**单独授权**——本仓库的 CI 不部署生产。
 
@@ -117,6 +118,7 @@ commit 历史、作者邮箱、敏感文件 —— 属于全局 Agent 基础设�
 | 数据目录 / 配置 | `tests/test_config.py`、`tests/test_data_dir.py` |
 | 旧数据兼容 | `tests/test_legacy_compat.py`、`tests/test_production_data_shapes.py` |
 | 前端 / UI | `tests/browser_verify.py`（需 playwright + chromium） |
+| 通知系统 | `tests/test_notifications.py`、`tests/browser_notify.py`（需 playwright + chromium） |
 
 新增测试放 `tests/`，用 fixture 造**虚构数据**，绝不写真实任务内容。
 
