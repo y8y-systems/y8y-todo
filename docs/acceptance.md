@@ -418,6 +418,67 @@ sudo python3 -c "import json;print(json.dumps(json.load(open('$DATA/notification
 **Pass:** a second run produces no duplicate send; the state file
 records the delivery, so a restart of the scheduler does not re-notify.
 
+### 9.3 Credential isolation (process permissions)
+
+These steps need a real host (real systemd, real `/proc`) and **root**.
+They cannot be simulated in a container — see the "Unverified" note at
+the end.
+
+```bash
+# 0. Baseline: the scheduler runs as the same user as the web service.
+systemctl show -p User y8y-todo.service y8y-todo-notify.service
+#    → both "y8y"   ← this is the condition that makes the check below fail
+
+# 1. The scheduler must have hardened itself (PR_SET_DUMPABLE = 0).
+sudo systemctl start y8y-todo-notify-dry-run.service
+PID=$(pgrep -f 'notify_runner.py' | head -1)
+sudo grep -E '^(Name|Uid|Dumpable)' /proc/$PID/status
+#    → "Dumpable: 0"
+
+# 2. The decisive test: read the scheduler's environment as the web user.
+#    The shell that runs this must already be the web user.
+sudo -u y8y cat /proc/$PID/environ >/dev/null
+#    → cat: /proc/<pid>/environ: Permission denied   ← PASS
+#    → (contents printed)                              ← FAIL, escalate
+
+# 3. The control group: cmdline must stay readable, so systemd, ps and
+#    the CI job that reads /proc/<pid>/exe keep working.
+sudo -u y8y cat /proc/$PID/cmdline
+#    → readable (may look garbled: NUL separators)
+
+# 4. The web unit must still not reference the credential file.
+sudo grep -c "EnvironmentFile" /etc/systemd/system/y8y-todo.service
+sudo grep -c "y8y-todo-notify.env" /etc/systemd/system/y8y-todo.service
+#    → 0
+
+# 5. The full audit (see docs/deployment.md §5.2.8).
+sudo python3 /opt/y8y-todo/scripts/check-notify-isolation.py \
+        --unit-dir /etc/systemd/system \
+        --env-file /etc/y8y-todo/y8y-todo-notify.env \
+        --data-dir /var/lib/y8y-todo
+#    → all five checks OK, exit code 0
+#    → "C1 FAIL" means both units still share a user: see §5.2.7
+```
+
+**Pass:** step 1 shows `Dumpable: 0`; step 2 is denied; step 3 still
+reads; step 4 shows no credential file in the web unit; step 5 exits 0.
+
+**Expected state today, before stage 2 (separate system user):**
+step 5 reports `C1 FAIL` and `C3 FAIL` — that is the known, documented
+gap of §5.2.7 and the reason the stage-2 migration exists. The
+credential read in step 2 must nevertheless be denied, because the
+scheduler hardens itself (§5.2.6). If step 2 succeeds, the scheduler
+is running an old copy of `src/procguard.py` or the hardening was
+disabled with `Y8Y_NOTIFY_KEEP_DUMPABLE=1`.
+
+**Not verified by this repository:** the behaviour of systemd 249's
+real unit files, `/proc` access across two real system users, and the
+ownership/ACL migration of §5.2.7 were all developed and reasoned
+about against the kernel and systemd sources, but the actual
+production host is the only place they can be confirmed. The audit
+script above is the instrument for that confirmation; run it as root
+and paste the output into the deployment report.
+
 ## 10. Run the full test suite and CI
 
 ```bash

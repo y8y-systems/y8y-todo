@@ -16,7 +16,9 @@
 所有数据都是虚构的, 不联网。
 """
 import json
+import os
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +32,7 @@ if str(SRC) not in sys.path:
 
 import notifications                                              # noqa: E402
 import notify_runner                                               # noqa: E402
+import procguard                                                  # noqa: E402
 from notifications import (                                        # noqa: E402
     NotifyConfig,
     Provider,
@@ -353,3 +356,190 @@ def test_notification_settings_api_response_has_no_credentials(server):
     raw = json.dumps(body, ensure_ascii=False).lower()
     for needle in ('token', 'secret', 'api_key', 'bearer', 'password'):
         assert needle not in raw, f'API 响应里出现了 {needle}'
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 7. 进程权限隔离: 同 UID 的另一个进程读不到调度器的凭据
+# ══════════════════════════════════════════════════════════════════════
+#
+# 内核的 ptrace_may_access() 对"同 UID"直接放行, 所以 Web 服务和通知
+# 调度器共用同一个系统用户时, 被攻破的 Web 进程能直接读出调度器的
+# /proc/<pid>/environ —— 里面就是 LINE token 和 Resend API key。
+#
+# 调度器启动时把自己设成"不可 dump" (prctl(PR_SET_DUMPABLE, 0)) 之后,
+# 同 UID 的读者拿不到 environ, 也拿不到 mem。下面的用例是真的去读
+# /proc/<pid>/environ, 不是模拟。
+
+def _spawn_reader_probe(script, env):
+    proc = subprocess.Popen([sys.executable, '-c', script], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True)
+    return proc
+
+
+def _read_environ(pid):
+    """读 /proc/<pid>/environ。返回 (是否读得到, 内容)。"""
+    try:
+        with open(f'/proc/{pid}/environ', 'rb') as f:
+            return True, f.read()
+    except (PermissionError, FileNotFoundError, ProcessLookupError):
+        return False, b''
+
+
+@pytest.mark.skipif(not sys.platform.startswith('linux'),
+                    reason='procguard 是 Linux 专有 (prctl PR_SET_DUMPABLE)')
+def test_same_uid_cannot_read_the_hardened_scheduler_environ(tmp_path):
+    secret = 'PROC_TEST_SECRET_TOKEN_0123456789'
+    env = dict(os.environ)
+    env['Y8Y_NOTIFY_LINE_TOKEN'] = secret
+
+    # 对照组: 一个**没有**加固的同 UID 进程 —— environ 读得到。
+    # (这正是要堵的洞; 如果当前环境本身就更严, 例如 hidepid, 就跳过。)
+    control = _spawn_reader_probe('import time; time.sleep(30)', env)
+    try:
+        readable, blob = _read_environ(control.pid)
+        if not readable:
+            pytest.skip('当前环境对 /proc 的读取已额外收紧 (如 hidepid), '
+                        '无法在本地复现"同 UID 可读"这一前提')
+        assert secret.encode() in blob, '对照前提不成立: 同 UID 竟读不到 environ'
+    finally:
+        control.kill()
+        control.wait()
+
+    # 实验组: 调度器加固之后 —— 同 UID 读不到 environ。
+    hardened = _spawn_reader_probe(
+        'import sys, time; sys.path.insert(0, %r); import procguard; '
+        'procguard.harden(); print("ready", flush=True); time.sleep(30)'
+        % str(SRC), env)
+    try:
+        assert hardened.stdout.readline().strip() == 'ready'
+        readable, _blob = _read_environ(hardened.pid)
+        assert not readable, '加固后的调度器 environ 仍被同 UID 读到'
+        # 内存同样读不到
+        try:
+            with open(f'/proc/{hardened.pid}/mem', 'rb') as f:
+                f.read(1)
+        except (PermissionError, OSError):
+            pass
+        else:
+            raise AssertionError('加固后的调度器 mem 仍被同 UID 读到')
+        # 但命令行与进程状态照常可见 —— systemd 监控与排查不受影响
+        cmdline = Path(f'/proc/{hardened.pid}/cmdline').read_bytes()
+        assert b'procguard' in cmdline
+        assert Path(f'/proc/{hardened.pid}/status').exists()
+    finally:
+        hardened.kill()
+        hardened.wait()
+
+
+@pytest.mark.skipif(not sys.platform.startswith('linux'),
+                    reason='procguard 是 Linux 专有 (prctl PR_SET_DUMPABLE)')
+def test_harden_respects_the_debug_escape_hatch():
+    before = procguard.dumpable()
+    assert procguard.harden({'Y8Y_NOTIFY_KEEP_DUMPABLE': '1'}) is False
+    assert procguard.dumpable() == before, '逃生阀生效时不该改动 dumpable'
+
+
+def test_runner_hardens_itself_at_startup(tmp_path, monkeypatch):
+    """调度器一启动就把自己设成不可 dump。"""
+    monkeypatch.setenv('Y8Y_USERS', 'alice@example.com=alice')
+    monkeypatch.setenv('Y8Y_DATA_DIR', str(tmp_path))
+    monkeypatch.setenv('Y8Y_NOTIFY_ENABLED', '0')
+    try:
+        notify_runner.main(['--dry-run'])
+        assert procguard.dumpable() == 0
+    finally:
+        procguard.allow_dumpable()      # 复位, 别影响后面的用例
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 8. 隔离审计脚本
+# ══════════════════════════════════════════════════════════════════════
+#
+# scripts/check-notify-isolation.py 是只读审计: 它用来在**目标宿主**上
+# 回答"Web 进程能不能读到通知凭据"。这个脚本自己必须守住两条线:
+#
+#   · 它得能认出"两个单元共用同一个用户"这种不安全状态 (退出码 1),
+#     否则它就是个永远说 OK 的安慰剂;
+#   · 它自己**不能**改任何东西 —— 不建用户、不改权限、不启停服务。
+#     审计工具顺手把生产环境改了, 那它就不是审计了。
+
+AUDIT_PY = REPO / 'scripts' / 'check-notify-isolation.py'
+AUDIT_SH = REPO / 'scripts' / 'check-notify-isolation.sh'
+
+# 会改动系统的命令 —— 审计脚本里出现任何一个都是 bug。
+# 注意: os.setuid / os.setgid **不算**在这里 —— 审计脚本要"降权到目标
+# 用户"才能做跨用户读取实测, 那是子进程里的降权, 不是对系统的改动;
+# 单独用下面的用例保证它只降不升。
+MUTATING_COMMANDS = (
+    'chown', 'chmod', 'chgrp', 'useradd', 'usermod', 'userdel',
+    'groupadd', 'groupdel', 'setfacl', 'chattr',
+    'systemctl', 'service ', 'visudo', 'mount', 'unlink', 'rmtree',
+)
+
+
+def test_isolation_audit_flags_a_shared_user_between_web_and_scheduler(tmp_path):
+    """共用同一个用户时, 审计脚本必须报失败 (退出码 1), 不能说 OK。"""
+    proc = subprocess.run(
+        [sys.executable, str(AUDIT_PY),
+         '--repo-packaging',
+         '--env-file', str(tmp_path / 'nonexistent.env'),
+         '--data-dir', str(tmp_path / 'nodata')],
+        capture_output=True, text=True)
+    assert proc.returncode == 1, (
+        f'审计脚本退出码应为 1 (有失败项), 实际 {proc.returncode}\n'
+        f'{proc.stdout}\n{proc.stderr}')
+    assert 'C1' in proc.stdout, proc.stdout
+    assert 'FAIL' in proc.stdout, proc.stdout
+    # 仓库自带的 packaging 模板里两个单元确实是同一个用户
+    assert 'y8y' in proc.stdout
+
+
+def test_isolation_audit_passes_when_the_units_use_different_users(tmp_path):
+    """两个单元用不同用户时, C1 必须判为 OK (其余项无法验证 → 退出码 2)。"""
+    unit_dir = tmp_path / 'units'
+    unit_dir.mkdir()
+    (unit_dir / 'y8y-todo.service').write_text(
+        '[Service]\nUser=y8y\n', encoding='utf-8')
+    (unit_dir / 'y8y-todo-notify.service').write_text(
+        '[Service]\nUser=y8y-notify\n', encoding='utf-8')
+    proc = subprocess.run(
+        [sys.executable, str(AUDIT_PY),
+         '--unit-dir', str(unit_dir),
+         '--env-file', str(tmp_path / 'nonexistent.env'),
+         '--data-dir', str(tmp_path / 'nodata')],
+        capture_output=True, text=True)
+    # 退出码 2 = 有无法验证项 (需要 root / 运行中的调度器) —— 不等于失败
+    assert proc.returncode == 2, (
+        f'退出码应为 2 (有无法验证项), 实际 {proc.returncode}\n{proc.stdout}')
+    assert 'C1' in proc.stdout and 'OK' in proc.stdout, proc.stdout
+
+
+def test_isolation_audit_script_is_read_only():
+    """审计脚本不得包含任何改动系统的命令。"""
+    for path in (AUDIT_PY, AUDIT_SH):
+        text = path.read_text(encoding='utf-8')
+        for command in MUTATING_COMMANDS:
+            assert command not in text, (
+                f'{path.name} 里出现了会改动系统的命令: {command!r}')
+        # 也不该出现 shell 重定向写入
+        assert not re.search(r'>\s*/etc/', text), path.name
+        assert not re.search(r'>\s*/var/', text), path.name
+
+
+def test_isolation_audit_wrapper_delegates_to_the_python_audit():
+    """wrapper 必须真的调用审计脚本, 不能自己吞掉结果。"""
+    text = AUDIT_SH.read_text(encoding='utf-8')
+    assert 'check-notify-isolation.py' in text
+    assert 'exec python3' in text
+
+
+def test_isolation_audit_never_raises_privileges():
+    """降权只降不升 —— 审计脚本不得把自己变成 root。"""
+    text = AUDIT_PY.read_text(encoding='utf-8')
+    assert 'setuid(0)' not in text
+    assert 'setgid(0)' not in text
+    # 只在子进程的 preexec 里降权
+    assert 'preexec_fn' in text
+
+

@@ -40,6 +40,7 @@ from notifications import (                                          # noqa: E40
     publish_capabilities,
     redact_secrets,
 )
+from procguard import harden as harden_process                       # noqa: E402
 
 
 def safe_text(config, text, limit=200):
@@ -101,6 +102,11 @@ def send_test(config, user, scheduler=None):
 
 
 def main(argv=None):
+    # 进程一启动就把自己变成"不可 dump": 同 UID 的其他进程 (例如被攻破的
+    # Web 服务) 就读不到 /proc/<pid>/environ 里的 LINE token / API key,
+    # 也读不到 /proc/<pid>/mem。命令行与进程状态照常可见, systemd 的监控
+    # 与排查不受影响。详见 src/procguard.py 与 docs/deployment.md §5.2。
+    harden_process()
     args = parse_args(argv if argv is not None else sys.argv[1:])
     config = NotifyConfig()
     if args.data_dir:

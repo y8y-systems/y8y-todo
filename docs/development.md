@@ -77,6 +77,7 @@ Agent 建的 PR 应当用**独立于人工审批者**的身份，这样评审才
 | `src/taskstore.py` | 任务文件解析/写盘的纯函数（serve 与通知引擎共用） | 行为要跟旧实现逐字一致；改这里等于改数据格式 |
 | `src/notifications.py` | 通知引擎（渠道 provider、设置、投递状态、调度） | 纯 stdlib；凭据只从环境变量读，绝不写进 Web 端 |
 | `src/notify_runner.py` | 通知调度器 CLI（一次性，systemd timer 驱动） | 退出码 0/1 的语义别改；provider 失败不许崩 |
+| `src/procguard.py` | 进程加固（`PR_SET_DUMPABLE=0`，让同 UID 进程读不到本进程环境变量） | 只用 stdlib（ctypes）；非 Linux 静默跳过；逃生阀 `Y8Y_NOTIFY_KEEP_DUMPABLE=1` |
 | `vendor/y8y-shared-chrome/` | 共享 UI 壳（tokens/icons/字体/主题引擎） | 是 vendored 的上游副本，改动要考虑同步 |
 | `tests/` | pytest 套件 + 浏览器脚本 | 新功能先在 `tests/conftest.py` 看 fixture 怎么造数据 |
 | `rehearsal/legacy-baseline/` | 旧版行为快照（升级演练用） | **不要手改**——`MANIFEST.sha256` 是防篡改 tripwire，改了 CI 会红 |
