@@ -38,7 +38,15 @@ from notifications import (                                          # noqa: E40
     SettingsStore,
     _resolve_tz,
     publish_capabilities,
+    redact_secrets,
 )
+
+
+def safe_text(config, text, limit=200):
+    """脱敏后的错误文本 —— 凭据值不会进入 stdout/journald。"""
+    getter = getattr(config, 'secrets', None)
+    values = getter() if callable(getter) else ()
+    return redact_secrets(text, values)[:limit]
 
 
 def parse_args(argv):
@@ -85,7 +93,8 @@ def send_test(config, user, scheduler=None):
         try:
             provider.send(user, message)
         except Exception as e:                                 # noqa: BLE001
-            results.append({'channel': name, 'status': 'failed', 'error': str(e)[:200]})
+            results.append({'channel': name, 'status': 'failed',
+                            'error': safe_text(config, str(e))})
         else:
             results.append({'channel': name, 'status': 'sent'})
     return results
@@ -145,5 +154,9 @@ if __name__ == '__main__':
         sys.exit(main())
     except Exception as exc:                                   # noqa: BLE001
         # 调度器永远不该让 systemd 看到崩溃循环 —— 记录后干净退出。
-        print(f'[notify] fatal error: {exc}', file=sys.stderr)
+        # 兜底脱敏: 顶层异常理论上也可能带出凭据 (例如 URL 解析失败)。
+        secrets = [os.environ.get('Y8Y_NOTIFY_LINE_TOKEN', ''),
+                   os.environ.get('Y8Y_NOTIFY_EMAIL_API_KEY', '')]
+        print(f'[notify] fatal error: {redact_secrets(str(exc), secrets)}',
+              file=sys.stderr)
         sys.exit(1)

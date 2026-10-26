@@ -308,36 +308,53 @@ Todo app must be unaffected.
 > ⚠️ Use **fictional** recipients only. Do not point this at a real LINE
 > account or a real mailbox unless you intend to receive the messages.
 
+> ℹ️ The commands below drive the two **helper units**
+> (`y8y-todo-notify-dry-run.service` and `y8y-todo-notify-test@<user>.service`,
+> see `docs/deployment.md` §5.1) instead of running the runner by hand.
+> They load the credential file through systemd's `EnvironmentFile=`, so
+> the token and the API key never appear in the command line, in the
+> shell history, or in the journal. Install them before continuing:
+>
+> ```bash
+> sudo cp /opt/y8y-todo/packaging/y8y-todo-notify-dry-run.service \
+>         /etc/systemd/system/
+> sudo cp /opt/y8y-todo/packaging/y8y-todo-notify-test@.service \
+>         /etc/systemd/system/
+> sudo systemctl daemon-reload
+> ```
+
 ```bash
 # 0. Nothing is configured yet → the scheduler must be a no-op, and the
 #    app must not care.
-sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
-     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
-#    → "notifications disabled (Y8Y_NOTIFY_ENABLED=0)"; exit code 0
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo systemctl show -p ExecMainStatus y8y-todo-notify-dry-run.service
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
+#    → "notifications disabled (Y8Y_NOTIFY_ENABLED=0)"; ExecMainStatus=0
 ```
 
 ```bash
 # 1. Master switch on, still no per-user opt-in → still nothing sent.
 sudo -e /etc/y8y-todo/y8y-todo-notify.env     # Y8Y_NOTIFY_ENABLED=1
 sudo systemctl restart y8y-todo-notify.service
-sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
-     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
-#    → "no user has enabled notifications"; exit code 0
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo systemctl show -p ExecMainStatus y8y-todo-notify-dry-run.service
+#    → "no user has enabled notifications"; ExecMainStatus=0
 ```
 
 ```bash
 # 2. The user opts in in the UI (Settings → Notifications): enable,
 #    pick a channel, set the lead time and the digest time, save.
 #    Then check what would be sent:
-sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
-     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
 #    → "[plan] user=alice channel=line kind=reminder …"
 ```
 
 ```bash
 # 3. Credential check for one channel (does it actually deliver?).
-sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
-     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --test alice
+#    The instance name is the user id, not a credential.
+sudo systemctl start y8y-todo-notify-test@alice.service
+sudo journalctl -u 'y8y-todo-notify-test@alice.service' -n 50 --no-pager
 #    → "line: sent"
 ```
 
@@ -359,14 +376,34 @@ print(json.dumps(d)[:2000])"
 
 # c. Another user's private task must never appear in someone's digest.
 #    Create a private task owned by bob, then dry-run as alice:
-sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
-     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
 #    → bob's private task title must not appear
+
+# d. The credential values must not appear in the journal, in the delivery
+#    state file, or in any process argument list.
+sudo python3 - <<'PY'
+import pathlib, subprocess
+env = pathlib.Path('/etc/y8y-todo/y8y-todo-notify.env').read_text()
+secrets = [line.split('=', 1)[1].strip() for line in env.splitlines()
+           if line.startswith(('Y8Y_NOTIFY_LINE_TOKEN=', 'Y8Y_NOTIFY_EMAIL_API_KEY='))]
+secrets = [s for s in secrets if s]
+journal = subprocess.run(
+    ['journalctl', '-u', 'y8y-todo-notify-dry-run.service', '--no-pager'],
+    capture_output=True, text=True).stdout
+state = pathlib.Path('/var/lib/y8y-todo/notification_state.json')
+blobs = [journal, state.read_text() if state.exists() else '']
+argv = subprocess.run(['ps', '-eo', 'args'], capture_output=True, text=True).stdout
+blobs.append(argv)
+print('LEAK' if any(s in blob for s in secrets for blob in blobs) else 'CLEAN')
+PY
+#    → CLEAN
 ```
 
 **Pass:** (a) the web unit never reads the notify env file; (b) no
 credential material in the capability table; (c) no other user's private
-task in any plan.
+task in any plan; (d) no credential value in the journal, in the state
+file, or in a process argument list.
 
 ### 9.2 Idempotency and recovery
 

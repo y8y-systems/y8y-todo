@@ -113,6 +113,30 @@ def _parse_targets(raw):
     return out
 
 
+# ── 脱敏 ──────────────────────────────────────────────────────────────
+def redact_secrets(text, secrets):
+    """把凭据值从任意文本里抹掉。
+
+    错误消息最终会落进三个地方: 投递状态文件 (notification_state.json)、
+    runner 的 stdout (→ journald)、以及能力表/调试日志。任何一处出现
+    真实 Token / API Key 都是凭据泄露, 所以统一在这里做替换。
+
+    规则:
+      * 只抹"看起来像凭据"的长串 (≥ 4 字符), 短串替换会误伤正常文本;
+      * 替换后统一写成 ``***``, 不保留长度/前缀等可用于还原的信息;
+      * ``text`` 为空时原样返回, 调用方不必判空。
+    """
+    if not text:
+        return ''
+    out = str(text)
+    for secret in (secrets or ()):
+        value = str(secret or '').strip()
+        if len(value) < 4:
+            continue
+        out = out.replace(value, '***')
+    return out
+
+
 # ── 配置 ──────────────────────────────────────────────────────────────
 class NotifyConfig(Config):
     """Config + notification-specific environment variables.
@@ -155,6 +179,14 @@ class NotifyConfig(Config):
             channels.append('email')
         return (f'notify={"on" if self.notify_enabled else "off"} '
                 f'channels={channels} catchup={self.catchup_hours}h')
+
+    def secrets(self):
+        """本配置里的所有敏感值 —— 供日志/状态文件脱敏使用。
+
+        只含真正的凭据 (LINE token / Resend API key)。收件地址、用户 id
+        之类不是凭据, 保持原样便于排查问题。
+        """
+        return [self.line_token, self.email_api_key]
 
 
 def _int(raw, default):
@@ -422,27 +454,34 @@ class Message:
 
 
 def post_json(url, payload, headers, timeout):
-    """标准库 HTTP POST (JSON)。失败一律抛 ProviderError。"""
+    """标准库 HTTP POST (JSON)。失败一律抛 ProviderError。
+
+    错误消息里**绝不**出现 Authorization header 的内容: 通用异常只记
+    异常类型名, 不记原始文本 —— 例如 header 值里含换行或非 Latin-1
+    字符时 urllib 会抛 ``ValueError: Invalid header value b'...'``,
+    直接把 str(e) 拼进消息就等于把 token 写进了日志。
+    """
     data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-    req = urllib.request.Request(url, data=data, method='POST')
-    req.add_header('Content-Type', 'application/json; charset=utf-8')
-    for key, value in (headers or {}).items():
-        req.add_header(key, value)
     try:
+        req = urllib.request.Request(url, data=data, method='POST')
+        req.add_header('Content-Type', 'application/json; charset=utf-8')
+        for key, value in (headers or {}).items():
+            req.add_header(key, value)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             resp.read()
             return resp.status
     except urllib.error.HTTPError as e:
         try:
-            e.read()
+            e.read()                              # 读完即弃: 响应体不进日志
         except Exception:                                    # noqa: BLE001
             pass
         retryable = e.code in (408, 425, 429) or 500 <= e.code < 600
-        raise ProviderError(f'HTTP {e.code} from {url}', retryable=retryable)
+        raise ProviderError(f'HTTP {e.code} from {url}', retryable=retryable) from None
     except urllib.error.URLError as e:
-        raise ProviderError(f'network error: {e.reason}', retryable=True)
+        raise ProviderError(f'network error: {e.reason}', retryable=True) from None
     except Exception as e:                                   # noqa: BLE001
-        raise ProviderError(f'unexpected error: {e}', retryable=True)
+        raise ProviderError(f'unexpected error: {type(e).__name__}',
+                            retryable=True) from None
 
 
 class Provider:
@@ -470,23 +509,36 @@ class Provider:
         """该用户此刻能不能收 (凭据齐备 + 有目标)。"""
         return bool(self.configured() and self.target_for(user))
 
+    def _safe(self, text):
+        """错误文本脱敏 —— 凭据值一律换成 ``***``。"""
+        getter = getattr(self.config, 'secrets', None)
+        values = getter() if callable(getter) else ()
+        return redact_secrets(text, values)
+
     def post(self, url, payload, headers):
         """调用 HTTP 接口, 把任何异常翻译成 ProviderError。
 
         重试策略在这里统一决定: 4xx (除 408/425/429) 是"重试也没用",
         5xx 与网络错误要重试。
+
+        所有出口的错误消息都过一遍脱敏 —— 凭据值不会进入状态文件、
+        runner 输出或 journald。
         """
         try:
             return self.transport(url, payload, headers, self.config.timeout)
-        except ProviderError:
-            raise
+        except ProviderError as e:
+            raise ProviderError(self._safe(str(e)),
+                                retryable=bool(getattr(e, 'retryable', True))) from None
         except urllib.error.HTTPError as e:
             retryable = e.code in (408, 425, 429) or 500 <= e.code < 600
-            raise ProviderError(f'HTTP {e.code} from {url}', retryable=retryable) from e
+            raise ProviderError(self._safe(f'HTTP {e.code} from {url}'),
+                                retryable=retryable) from None
         except urllib.error.URLError as e:
-            raise ProviderError(f'network error: {e.reason}', retryable=True) from e
+            raise ProviderError(self._safe(f'network error: {e.reason}'),
+                                retryable=True) from None
         except Exception as e:                                   # noqa: BLE001
-            raise ProviderError(f'unexpected error: {e}', retryable=True) from e
+            raise ProviderError(f'unexpected error: {type(e).__name__}',
+                                retryable=True) from None
 
     def send(self, user, message):
         """投递一条消息。失败抛 ProviderError。"""
@@ -907,6 +959,17 @@ class Scheduler:
         link = self._link()
         return f'打开：{link}/todo/' if link else '打开 Todo 应用查看详情'
 
+    def _safe_error(self, exc, limit=200):
+        """错误文本落盘/打印前的最后一道脱敏。
+
+        ProviderError 的消息已经过 Provider._safe 脱敏, 这里再兜一次底:
+        万一某个自定义 provider 直接把原始异常拼进消息, 也不会把凭据
+        写进 notification_state.json 或 journald。
+        """
+        getter = getattr(self.config, 'secrets', None)
+        values = getter() if callable(getter) else ()
+        return redact_secrets(str(exc), values)[:limit]
+
     # ── 投递 ──
     def _deliver(self, user, key, task, message, channels, report, dry_run):
         meta = {
@@ -939,18 +1002,19 @@ class Scheduler:
                     delay = min(RETRY_BASE_MINUTES * (2 ** (attempts - 1)), RETRY_CAP_MINUTES)
                     next_at = (self.now or datetime.now(self.tz)) + timedelta(minutes=delay)
                     payload = {'status': status, 'at': _now_iso(self.now),
-                               'attempts': attempts, 'error': str(e)[:200],
+                               'attempts': attempts, 'error': self._safe_error(e, 200),
                                'next_attempt_at': next_at.isoformat()}
                 else:
                     status = 'exhausted'
                     payload = {'status': status, 'at': _now_iso(self.now),
-                               'attempts': attempts, 'error': str(e)[:200]}
+                               'attempts': attempts, 'error': self._safe_error(e, 200)}
                 self.state_store.set_channel_state(key, channel, payload, meta)
                 report['failed'].append({'user': user, 'channel': channel,
-                                         'task': task.title, 'error': str(e)[:200],
+                                         'task': task.title, 'error': self._safe_error(e, 200),
                                          'status': status})
                 self.log.append(f'send failed user={user} channel={channel} '
-                                f'task={task.title!r} status={status} error={str(e)[:120]}')
+                                f'task={task.title!r} status={status} '
+                                f'error={self._safe_error(e, 120)}')
             else:
                 attempts = int((state or {}).get('attempts', 0)) + 1
                 payload = {'status': 'sent', 'at': _now_iso(self.now), 'attempts': attempts}
@@ -992,14 +1056,14 @@ class Scheduler:
                     delay = min(RETRY_BASE_MINUTES * (2 ** (attempts - 1)), RETRY_CAP_MINUTES)
                     next_at = now + timedelta(minutes=delay)
                     payload = {'status': status, 'at': _now_iso(self.now), 'attempts': attempts,
-                               'error': str(e)[:200], 'next_attempt_at': next_at.isoformat()}
+                               'error': self._safe_error(e, 200), 'next_attempt_at': next_at.isoformat()}
                 else:
                     status = 'exhausted'
                     payload = {'status': status, 'at': _now_iso(self.now),
-                               'attempts': attempts, 'error': str(e)[:200]}
+                               'attempts': attempts, 'error': self._safe_error(e, 200)}
                 self.state_store.set_digest_state(key, payload)
                 report['failed'].append({'user': user, 'channel': channel, 'kind': 'digest',
-                                         'error': str(e)[:200], 'status': status})
+                                         'error': self._safe_error(e, 200), 'status': status})
             else:
                 self.state_store.set_digest_state(key, {'status': 'sent',
                                                         'at': _now_iso(self.now),

@@ -246,6 +246,10 @@ the digest time.
 # 1. Units + env file (credentials stay on the server, root:root 600).
 sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.{service,timer} \
         /etc/systemd/system/
+sudo cp /opt/y8y-todo/packaging/y8y-todo-notify-dry-run.service \
+        /etc/systemd/system/
+sudo cp /opt/y8y-todo/packaging/y8y-todo-notify-test@.service \
+        /etc/systemd/system/
 sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.env.example \
         /etc/y8y-todo/y8y-todo-notify.env
 sudo chmod 600 /etc/y8y-todo/y8y-todo-notify.env
@@ -258,14 +262,17 @@ systemctl list-timers y8y-todo-notify.timer
 ```
 
 Check what *would* be sent without sending it, and verify the
-credentials of one channel:
+credentials of one channel. Use the two helper units — they load the
+same `EnvironmentFile` as the timer, so the token and the API key stay
+in the process environment and never reach the command line, the
+journal, or the shell history:
 
 ```bash
-sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
-     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
 
-sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
-     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --test alice
+sudo systemctl start y8y-todo-notify-test@alice.service
+sudo journalctl -u 'y8y-todo-notify-test@alice.service' -n 50 --no-pager
 ```
 
 If no channel is configured, the scheduler simply does nothing — the

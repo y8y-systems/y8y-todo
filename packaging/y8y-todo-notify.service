@@ -30,11 +30,18 @@
 #   sudo systemctl enable --now y8y-todo-notify.timer
 #
 # 想先看看会发什么 (不发送):
-#   sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
-#        /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+#   sudo systemctl start y8y-todo-notify-dry-run.service
+#   sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
 #
 # 想验证某个渠道的凭据:
-#   ... /opt/y8y-todo/src/notify_runner.py --test <用户id>
+#   sudo systemctl start y8y-todo-notify-test@<用户id>.service
+#   sudo journalctl -u 'y8y-todo-notify-test@<用户id>.service' -n 50 --no-pager
+#
+# ⚠️ 不要把凭据文件展开进命令行 (例如用命令替换把 env 文件塞进 env 的
+#    参数列表) —— 那会把 token / api key 暴露在 /proc/<pid>/cmdline、
+#    shell 历史和日志里, 而且凭据含空格或特殊字符时命令会直接解析失败。
+#    上面的两个辅助单元用同一个 EnvironmentFile= 加载凭据, 因此凭据
+#    只存在于进程环境里, 不会进 argv, 也不会进 journald。
 [Unit]
 Description=y8y Todo notification scheduler (one-shot)
 After=network.target

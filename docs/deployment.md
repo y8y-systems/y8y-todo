@@ -440,6 +440,8 @@ a deployment that never installs it behaves exactly as before.
 ```
 /etc/systemd/system/y8y-todo-notify.service   ← Type=oneshot
 /etc/systemd/system/y8y-todo-notify.timer     ← every 5 minutes
+/etc/systemd/system/y8y-todo-notify-dry-run.service  ← manual dry-run
+/etc/systemd/system/y8y-todo-notify-test@.service     ← manual channel test
 /etc/y8y-todo/y8y-todo-notify.env             ← credentials, root:root 600
 /opt/y8y-todo/src/notify_runner.py             ← the scheduler
 ```
@@ -462,6 +464,10 @@ sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.service \
         /etc/systemd/system/y8y-todo-notify.service
 sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.timer \
         /etc/systemd/system/y8y-todo-notify.timer
+sudo cp /opt/y8y-todo/packaging/y8y-todo-notify-dry-run.service \
+        /etc/systemd/system/y8y-todo-notify-dry-run.service
+sudo cp /opt/y8y-todo/packaging/y8y-todo-notify-test@.service \
+        /etc/systemd/system/y8y-todo-notify-test@.service
 sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.env.example \
         /etc/y8y-todo/y8y-todo-notify.env
 sudo chmod 600 /etc/y8y-todo/y8y-todo-notify.env   # root:root
@@ -470,9 +476,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now y8y-todo-notify.timer
 ```
 
-Both units read `/etc/y8y-todo/y8y-todo.env` as well (identity mapping
-and data directory), so the scheduler knows who the users are and where
-the tasks live.
+All three scheduler units read `/etc/y8y-todo/y8y-todo.env` as well
+(identity mapping and data directory), so the scheduler knows who the
+users are and where the tasks live.
 
 #### Configuration
 
@@ -499,14 +505,21 @@ Todo app error out.
 
 #### Verify before enabling
 
+Use the two helper units. They load the same `EnvironmentFile=` as the
+timer, so the LINE token and the Resend API key stay in the process
+environment — they never appear in the command line (where any local
+user could read them out of `/proc/<pid>/cmdline`), in the shell
+history, or in the journal. Expanding the env file into an argument
+list by hand is exactly what these units exist to avoid.
+
 ```bash
 # What would be sent right now? (computes everything, sends nothing)
-sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
-     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
 
 # Does the credential work for one user?
-sudo -u y8y env $(cat /etc/y8y-todo/y8y-todo-notify.env) \
-     /usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --test alice
+sudo systemctl start y8y-todo-notify-test@alice.service
+sudo journalctl -u 'y8y-todo-notify-test@alice.service' -n 50 --no-pager
 
 # Logs
 journalctl -u y8y-todo-notify.service -n 50 --no-pager
@@ -515,6 +528,16 @@ systemctl list-timers y8y-todo-notify.timer
 
 `--dry-run` also prints the planned messages, so you can confirm the
 wording and the recipients before anything leaves the server.
+
+The instance name of the test unit (`alice` above) is a **user id**,
+not a credential — it is the id part of `Y8Y_USERS="email=id"`. Keep it
+to letters, digits, `.`, `_` and `-`: systemd splits the command line on
+whitespace.
+
+Credential values are redacted everywhere they could show up: if a
+provider call fails, the error text stored in `notification_state.json`,
+printed by the runner and written to the journal replaces the token and
+the API key with `***`.
 
 #### Operational notes
 
