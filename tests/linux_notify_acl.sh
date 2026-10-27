@@ -6,12 +6,13 @@ fixture=$(mktemp -d /tmp/todo-notify-acl.XXXXXX)
 trap 'rm -rf "$fixture"' EXIT
 web=y8y
 notify=y8y-notify
+# Let the two fixture users traverse the temporary parent before setup.
+chmod 0711 "$fixture"
 install -d -o "$web" -g "$web" -m 0700 "$fixture/data"
 runuser -u "$web" -- mkdir -p "$fixture/data/todo/old" "$fixture/data/recurring"
 runuser -u "$web" -- sh -c 'printf "fictional\n" > "$1/todo/old/task.md"; printf "fictional\n" > "$1/recurring/task.md"; printf "fixture\n" > "$1/internal_tokens.json"; chmod 600 "$1/internal_tokens.json"' sh "$fixture/data"
 install -d -o "$notify" -g "$notify" -m 2770 "$fixture/data/notify"
-# Traverse the fixture and private data root, without allowing root listing.
-chmod 0711 "$fixture"
+# Traverse the private data root, without allowing root listing.
 setfacl -m u:y8y-notify:--x "$fixture/data"
 find -P "$fixture/data/todo" "$fixture/data/recurring" -type d -exec setfacl -m u:y8y-notify:r-x,d:u:y8y-notify:r-x {} +
 find -P "$fixture/data/todo" "$fixture/data/recurring" -type f -name '*.md' -exec setfacl -m u:y8y-notify:r-- {} +
