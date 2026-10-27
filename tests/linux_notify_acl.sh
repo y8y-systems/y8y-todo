@@ -17,8 +17,9 @@ setfacl -m u:y8y-notify:--x "$fixture/data"
 find -P "$fixture/data/todo" "$fixture/data/recurring" -type d -exec setfacl -m u:y8y-notify:r-x,d:u:y8y-notify:r-x {} +
 find -P "$fixture/data/todo" "$fixture/data/recurring" -type f -name '*.md' -exec setfacl -m u:y8y-notify:r-- {} +
 runuser -u "$web" -- mkdir -p "$fixture/data/todo/new/deep"
-install -m 0644 "$repo/src/taskstore.py" "$fixture/taskstore.py"
-runuser -u "$web" -- python3 - "$fixture" "$fixture/data/todo/new/deep/task.md" <<'PY'
+install -d -m 0755 "$fixture/code"
+install -m 0644 "$repo/src/taskstore.py" "$fixture/code/taskstore.py"
+runuser -u "$web" -- python3 - "$fixture/code" "$fixture/data/todo/new/deep/task.md" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
 from taskstore import atomic_write
