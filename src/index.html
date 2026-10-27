@@ -395,6 +395,44 @@ body::after {
   color: var(--text-muted);
   margin-top: 8px;
 }
+/* ── 通知设置 (2026-10, 通知系统 V1) ── */
+.notify-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
+.notify-channel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-11);
+  font-family: var(--font-ui);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.notify-channel input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-brand);
+  cursor: pointer;
+}
+.notify-channel input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.notify-row {
+  margin-top: 8px;
+  gap: 12px;
+}
+.notify-row .form-group {
+  flex: 1;
+  margin-bottom: 0;
+}
+.notify-save {
+  margin-top: 12px;
+  width: 100%;
+}
 /* ── 持久项目 (2026-08-11) ── */
 .persistent-row {
   display: flex;
@@ -1819,6 +1857,27 @@ body.modal-locked {
           <button class="owner-toggle y8y-seg-btn" id="cnHolidayBtn" type="button" aria-pressed="true" title="在日历上标注中国法定节假日与调休上班日"><span class="y8i y8i-calendar"></span> 中国节假日</button>
         </div>
         <div class="settings-hint">默认跟随服务端配置（Y8Y_CN_HOLIDAYS / Y8Y_CN_HOLIDAY_USERS）；此开关为当前用户的本机覆盖，与身份无关</div>
+      </div>
+      <div class="settings-group y8y-settings-group">
+        <label class="settings-label y8y-settings-label">通知</label>
+        <div class="owner-toggle-group" role="group" aria-label="启用通知">
+          <button class="owner-toggle y8y-seg-btn" id="notifyEnabledBtn" type="button" aria-pressed="false"><span class="y8i y8i-check"></span> 启用通知</button>
+          <button class="owner-toggle y8y-seg-btn" id="notifyDigestBtn" type="button" aria-pressed="false"><span class="y8i y8i-check"></span> 每日摘要</button>
+        </div>
+        <div class="notify-channels" id="notifyChannelsRow"></div>
+        <div class="settings-hint" id="notifyHint">正在读取通知设置…</div>
+        <div class="form-row notify-row">
+          <div class="form-group">
+            <label>提前提醒（分钟）</label>
+            <input type="number" id="notifyLeadMinutes" min="0" max="1440" step="5" value="0" title="带截止时间的任务提前多少分钟提醒；0 = 到点提醒">
+          </div>
+          <div class="form-group">
+            <label>摘要时间</label>
+            <input type="time" id="notifyDigestTime" value="08:00" title="每日汇总（全天任务 + 逾期任务）的发送时间">
+          </div>
+        </div>
+        <div class="settings-hint">带截止时间的任务按「提前提醒」单独通知；没有时间的全天任务进入每日摘要。</div>
+        <button class="btn btn-primary y8y-btn y8y-btn-primary notify-save" id="notifySaveBtn" type="button">保存通知设置</button>
       </div>
       <div class="settings-group y8y-settings-group">
         <label class="settings-label y8y-settings-label">持久项目</label>
@@ -3918,6 +3977,7 @@ function openSettings() {
   updateThemeControls();
   updateCalTodoOnlyControls();
   renderPersistentProjects();
+  loadNotificationSettings();
   document.getElementById('settingsOverlay').classList.add('open');
 }
 function closeSettings() {
@@ -3932,6 +3992,120 @@ document.addEventListener('keydown', (event) => {
     closeSettings();
   }
 });
+
+// ── 通知设置 (2026-10, 通知系统 V1) ──
+// 设置存在服务器端 (每用户一份), 凭据不在浏览器也不在 Web 进程里;
+// 界面只显示"这个用户能用哪些渠道" —— 那份能力表由调度器发布。
+let notifySettings = null;
+let notifyChannels = [];
+let notifyAvailable = false;
+
+async function loadNotificationSettings() {
+  try {
+    const res = await fetch('/todo/api/notification-settings');
+    if (!res.ok) return;
+    const data = await res.json();
+    notifySettings = data.settings && typeof data.settings === 'object' ? data.settings : {};
+    notifyChannels = Array.isArray(data.channels) ? data.channels : [];
+    notifyAvailable = !!data.available;
+    renderNotificationSettings();
+  } catch (e) { /* 静默: 离线时保留上一次渲染 */ }
+}
+
+function renderNotificationSettings() {
+  const enabledBtn = document.getElementById('notifyEnabledBtn');
+  const digestBtn = document.getElementById('notifyDigestBtn');
+  const enabled = !!(notifySettings && notifySettings.enabled);
+  const digest = !!(notifySettings && notifySettings.daily_digest);
+
+  enabledBtn.classList.toggle('active', enabled);
+  enabledBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+  digestBtn.classList.toggle('active', digest);
+  digestBtn.setAttribute('aria-pressed', digest ? 'true' : 'false');
+
+  const lead = document.getElementById('notifyLeadMinutes');
+  const digestTime = document.getElementById('notifyDigestTime');
+  lead.value = (notifySettings && notifySettings.lead_minutes != null) ? notifySettings.lead_minutes : 0;
+  digestTime.value = (notifySettings && notifySettings.digest_time) || '08:00';
+
+  const row = document.getElementById('notifyChannelsRow');
+  const hint = document.getElementById('notifyHint');
+  row.replaceChildren();
+
+  const selected = new Set((notifySettings && notifySettings.channels) || []);
+  if (!notifyChannels.length) {
+    hint.textContent = notifyAvailable
+      ? '服务器尚未配置任何通知渠道（请让管理员配置凭据）。'
+      : '通知功能尚未在服务器上启用（请让管理员开启定时器）；你的选择会先保存下来。';
+    return;
+  }
+  for (const ch of notifyChannels) {
+    const label = document.createElement('label');
+    label.className = 'notify-channel';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = ch.name;
+    box.checked = selected.has(ch.name);
+    box.disabled = !ch.available;
+    const text = document.createElement('span');
+    text.textContent = ch.label + (ch.available ? '' : '（未配置）');
+    label.appendChild(box);
+    label.appendChild(text);
+    row.appendChild(label);
+  }
+  const unavailable = notifyChannels.filter((c) => !c.available).map((c) => c.label);
+  if (!notifyAvailable) {
+    hint.textContent = '服务器尚未启用通知发送（需要管理员配置定时器）；'
+      + '你的选择会先保存下来。';
+  } else if (unavailable.length) {
+    hint.textContent = `未为你配置的渠道：${unavailable.join('、')}`;
+  } else {
+    hint.textContent = '提醒由服务器定时器发送，设置只对你自己生效。';
+  }
+}
+
+function toggleNotifyButton(btnId) {
+  const btn = document.getElementById(btnId);
+  const on = btn.getAttribute('aria-pressed') === 'true';
+  btn.setAttribute('aria-pressed', on ? 'false' : 'true');
+  btn.classList.toggle('active', !on);
+}
+
+async function saveNotificationSettings() {
+  const channels = Array.from(
+    document.querySelectorAll('#notifyChannelsRow input[type="checkbox"]')
+  ).filter((b) => b.checked).map((b) => b.value);
+  const leadRaw = parseInt(document.getElementById('notifyLeadMinutes').value, 10);
+  const payload = {
+    enabled: document.getElementById('notifyEnabledBtn').getAttribute('aria-pressed') === 'true',
+    channels: channels,
+    lead_minutes: isNaN(leadRaw) ? 0 : Math.max(0, Math.min(1440, leadRaw)),
+    daily_digest: document.getElementById('notifyDigestBtn').getAttribute('aria-pressed') === 'true',
+    digest_time: document.getElementById('notifyDigestTime').value || '08:00',
+  };
+  try {
+    const res = await fetch('/todo/api/notification-settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    let data = {};
+    try { data = await res.json(); } catch (e) { /* 非 JSON 响应 */ }
+    if (!res.ok) {
+      showToast('✗ ' + (data.error || '保存失败'), 2500);
+      return;
+    }
+    notifySettings = data.settings || payload;
+    renderNotificationSettings();
+    showToast('✓ 通知设置已保存');
+  } catch (e) {
+    showToast('✗ 通知设置保存失败', 2500);
+  }
+}
+
+document.getElementById('notifyEnabledBtn').addEventListener('click', () => toggleNotifyButton('notifyEnabledBtn'));
+document.getElementById('notifyDigestBtn').addEventListener('click', () => toggleNotifyButton('notifyDigestBtn'));
+document.getElementById('notifySaveBtn').addEventListener('click', saveNotificationSettings);
 
 // ── 持久项目 (2026-08-12: localStorage → 后端 /todo/api/persistent-projects, 跨设备同步) ──
 let persistentProjectsCache = [];

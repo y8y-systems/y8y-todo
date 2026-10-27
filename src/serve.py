@@ -19,6 +19,37 @@ from zoneinfo import ZoneInfo
 
 from config import Config
 
+# Notification preferences (per user) + the channel capability table.
+#
+# ⚠️ The web process never holds third-party credentials (LINE token,
+# Resend key): those live only in the scheduler's environment. The
+# scheduler publishes a capability table (which users can use which
+# channel) into the data dir; the API below just reads it.
+from notifications import (
+    Capabilities,
+    NOTIFY_DIR_NAME,
+    SettingsStore as NotificationSettingsStore,
+    normalize_settings,
+    registered_channels,
+)
+
+# On-disk task format helpers live in their own module so that other
+# processes (the notification scheduler) read/write tasks with exactly the
+# same rules — one source of truth, no drift between writer and reader.
+# The names below stay importable from `serve` (tests and scripts rely on
+# `serve.parse_frontmatter` / `serve.build_frontmatter` / `serve.atomic_write`).
+from taskstore import (
+    atomic_write,
+    build_frontmatter,
+    display_title as _display_title,
+    parse_frontmatter,
+    scan_md_files as _scan_md_files,
+    task_owner as _task_owner_of,
+    can_access as _can_access_of,
+    yaml_parse_scalar as _yaml_parse_scalar,
+    yaml_scalar as _yaml_scalar,
+)
+
 # Vendored shared UI shell (icons/tokens/header CSS, theme engine) lives
 # inside this repo — no deployment-specific sys.path entries.
 VENDOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'vendor', 'y8y-shared-chrome')
@@ -70,6 +101,24 @@ LISTS_ROOT = str(CONFIG.lists_root)
 SHOPPING_DIR = str(CONFIG.shopping_dir)
 INTERNAL_TOKENS_FILE = str(CONFIG.internal_tokens_file)
 PERSISTENT_PROJECTS_FILE = str(CONFIG.persistent_projects_file)
+# 通知: 每用户偏好 + 渠道能力表 (调度器发布, 只读)
+NOTIFICATION_SETTINGS_FILE = os.path.join(TODOLIST_DIR, NOTIFY_DIR_NAME, 'notification_settings.json')
+NOTIFICATION_CHANNELS_FILE = os.path.join(TODOLIST_DIR, NOTIFY_DIR_NAME, 'notification_channels.json')
+
+
+def notification_settings_payload(user):
+    """某用户的通知设置 + 该用户可用的渠道列表 (不含任何凭据)。"""
+    store = NotificationSettingsStore(NOTIFICATION_SETTINGS_FILE)
+    caps = Capabilities(NOTIFICATION_CHANNELS_FILE)
+    available = caps.enabled()
+    return {
+        'settings': store.get(user),
+        'channels': caps.channels_for(user),
+        'available': available,
+        'hint': ('通知由服务器上的定时器发送；如需开启请联系管理员。'
+                 if not available else ''),
+    }
+
 
 
 # ── 安全工具 ────────────────────────────────────────────────────────────
@@ -88,23 +137,6 @@ def safe_join(root, *parts):
     if candidate != root_real and not candidate.startswith(root_real + os.sep):
         return None
     return candidate
-
-
-def atomic_write(path, text):
-    """Write text to path atomically (tmp file + rename).
-
-    A crash mid-write can never leave a half-written task or list file
-    behind; readers see either the old or the new content, never a mix.
-    Missing parent directories are created on demand (fresh deployments
-    start with an empty data directory).
-    """
-    tmp = f'{path}.tmp'
-    parent = os.path.dirname(tmp)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(text)
-    os.replace(tmp, path)
 
 
 def checked_list_dir(lid):
@@ -150,14 +182,6 @@ def _unique_task_path(directory, title):
         fpath = os.path.join(directory, fname)
         if not os.path.exists(fpath):
             return fpath
-
-
-def _display_title(fm, path):
-    """任务的显示标题: frontmatter title 优先, 回退文件名(旧数据)。"""
-    title = fm.get('title')
-    if title:
-        return title
-    return os.path.basename(path)[:-3] if path.endswith('.md') else os.path.basename(path)
 
 
 def _clean_project_name(name):
@@ -228,12 +252,12 @@ AUTH_USERS = CONFIG.users   # {email: user_id}
 
 def _task_owner(fm):
     """任务归属；无 owner 字段 = 第一个配置用户（旧数据零迁移兼容）"""
-    return fm.get('owner', CONFIG.default_owner)
+    return _task_owner_of(fm, CONFIG.default_owner)
 
 
 def _user_can_access(owner, user):
     """用户能看/改的任务：自己的 + 共享的。私人任务互不可见。"""
-    return owner in (user, 'shared')
+    return _can_access_of(owner, user)
 
 
 def _list_visible(list_owner, user):
@@ -244,75 +268,6 @@ def _list_visible(list_owner, user):
 def _can_access_shopping(owner, user):
     """购物条目访问控制 = 所属列表的可见性。"""
     return _list_visible(owner, user)
-
-def _yaml_scalar(value):
-    """Serialize a string as a YAML-safe frontmatter scalar.
-
-    Plain (unquoted) values stay byte-identical to the legacy on-disk
-    format. Values containing characters that would corrupt the
-    frontmatter (newlines, CR, double quotes, backslashes, or
-    leading/trailing whitespace that the line-based parser would strip)
-    are written as a JSON double-quoted scalar — JSON escaping is a
-    subset of YAML double-quoted escaping, and parse_frontmatter decodes
-    it back symmetrically.
-
-    This closes the whole class of frontmatter-injection bugs: a title
-    like 'a\\n---' or 'x\\nkey: injected' can no longer truncate the
-    value or fabricate fields.
-    """
-    if not isinstance(value, str):
-        return value
-    if value and not any(c in value for c in '\n\r"\\') and value == value.strip():
-        return value
-    return json.dumps(value, ensure_ascii=False)
-
-
-def _yaml_parse_scalar(value):
-    """Decode a frontmatter scalar written by _yaml_scalar (JSON
-    double-quoted form). Plain values pass through unchanged."""
-    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
-        try:
-            decoded = json.loads(value)
-            if isinstance(decoded, str):
-                return decoded
-        except Exception:
-            pass
-    return value
-
-
-def parse_frontmatter(text):
-    """Parse YAML frontmatter from markdown content."""
-    m = re.match(r'^---\s*\n(.*?)\n---\s*\n(.*)', text, re.DOTALL)
-    if not m:
-        return {}, text.strip()
-    fm = {}
-    current_list_key = None
-    current_list = []
-    for line in m.group(1).strip().split('\n'):
-        if line.startswith('  - '):
-            # continuation of a list (e.g. recurring, children)
-            if current_list_key is not None:
-                current_list.append(_yaml_parse_scalar(line[4:].strip()))
-                fm[current_list_key] = current_list
-            continue
-        if ':' in line:
-            key, _, val = line.partition(':')
-            key = key.strip()
-            val = _yaml_parse_scalar(val.strip())
-            if val == '':
-                # key with no value, possibly followed by list items
-                current_list_key = key
-                current_list = []
-                # only reset fm[key] if not already populated by previous list items
-                if key not in fm:
-                    fm[key] = current_list
-            else:
-                fm[key] = val
-                current_list_key = None
-                current_list = []
-    body = m.group(2).strip()
-    return fm, body
-
 
 VALID_COLORS = ('yellow', 'green', 'pink', 'purple', 'orange', 'red', 'blue', 'cyan')
 
@@ -471,73 +426,6 @@ def cascade_project_color(project, color, user, skip_fname=None):
                 continue
             fm['color'] = color
             atomic_write(fpath, build_frontmatter(fm) + '\n\n' + body + '\n')
-
-
-def build_frontmatter(fields):
-    """Build YAML frontmatter string from fields dict.
-
-    Scalar values go through _yaml_scalar: plain values keep the legacy
-    on-disk shape; values with newline/quote/backslash/edge-whitespace
-    are JSON-quoted so they survive the line-based parser intact.
-    """
-    # Scalar fields written in a fixed order; project is an optional scalar.
-    scalar_order = ('title', 'created', 'due', 'due_end', 'due_time', 'color', 'status', 'completed', 'task_uid', 'gcal_event_id', 'project', 'owner')
-    lines = ['---']
-    written = set()
-    for k in scalar_order:
-        v = fields.get(k)
-        if v:
-            lines.append(f'{k}: {_yaml_scalar(v) if isinstance(v, str) else v}')
-            written.add(k)
-    # recurring as list or scalar
-    if fields.get('recurring'):
-        v = fields['recurring']
-        if isinstance(v, list):
-            lines.append('recurring:')
-            for r in v:
-                lines.append(f'  - {_yaml_scalar(r) if isinstance(r, str) else r}')
-        else:
-            lines.append(f'recurring: {_yaml_scalar(v) if isinstance(v, str) else v}')
-        written.add('recurring')
-    # children as list (brain-map edges, source → target)
-    children = fields.get('children')
-    if children:
-        if isinstance(children, list):
-            lines.append('children:')
-            for c in children:
-                lines.append(f'  - {_yaml_scalar(c) if isinstance(c, str) else c}')
-        else:
-            # scalar fallback (shouldn't happen, but be safe)
-            lines.append(f'children: {_yaml_scalar(children) if isinstance(children, str) else children}')
-        written.add('children')
-    # any other unknown fields (preserve them)
-    for k, v in fields.items():
-        if k in written or k in ('recurring', 'children'):
-            continue
-        if v:
-            lines.append(f'{k}: {_yaml_scalar(v) if isinstance(v, str) else v}')
-    lines.append('---')
-    return '\n'.join(lines)
-
-def _scan_md_files(folder_path, prefix=''):
-    """递归扫描 folder_path 下所有 .md 文件（项目文件夹方案，2026-08-13）。
-
-    返回 [(rel_path, fname), ...]，rel_path 相对 folder_path 的路径（含子目录），
-    fname 是纯文件名。例：todo/纹眉/脚本.md → ('纹眉/脚本.md', '脚本.md')
-    """
-    results = []
-    try:
-        entries = sorted(os.listdir(folder_path))
-    except FileNotFoundError:
-        return results
-    for entry in entries:
-        full = os.path.join(folder_path, entry)
-        if os.path.isdir(full):
-            results.extend(_scan_md_files(full, os.path.join(prefix, entry) if prefix else entry))
-        elif entry.endswith('.md'):
-            rel = os.path.join(prefix, entry) if prefix else entry
-            results.append((rel, entry))
-    return results
 
 
 def _list_dir(list_id):
@@ -938,6 +826,15 @@ class TodolistHandler(http.server.BaseHTTPRequestHandler):
                 self._send_error('Unauthorized', 401)
                 return
             self._send_json({'projects': get_persistent_projects(user)})
+            return
+
+        # API: 通知设置 (每用户偏好; 凭据不在 Web 进程里)
+        if path == '/todo/api/notification-settings':
+            user = self._current_user()
+            if user is None:
+                self._send_error('Unauthorized', 401)
+                return
+            self._send_json(notification_settings_payload(user))
             return
 
         # API: list tasks
@@ -1416,6 +1313,33 @@ class TodolistHandler(http.server.BaseHTTPRequestHandler):
             self._send_error('Unauthorized', 401)
             return
 
+        # API: 通知设置 (每用户偏好, 覆盖保存)
+        if path == '/todo/api/notification-settings':
+            user = self._current_user()
+            if user is None:
+                self._send_error('Unauthorized', 401)
+                return
+            settings, err = normalize_settings(body_data,
+                                              known_channels=registered_channels())
+            if err:
+                self._send_error(err, 400)
+                return
+            store = NotificationSettingsStore(NOTIFICATION_SETTINGS_FILE)
+            try:
+                store.set(user, settings)
+            except OSError as exc:
+                # 状态目录没配好 (权限/属主不对) —— 告诉调用方, 别让它
+                # 以为"保存成功但没生效"。
+                self._send_error(
+                    'Notification state directory is not writable: '
+                    f'{os.path.dirname(NOTIFICATION_SETTINGS_FILE)} '
+                    f'({exc.strerror or exc})', 500)
+                return
+            payload = notification_settings_payload(user)
+            payload['settings'] = settings
+            self._send_json(payload)
+            return
+
         # 列表系统: 修改列表归属或条目
         # 列表归属更改: PUT /todo/api/lists/<id>  {owner?}
         m_listmeta = re.match(r'^/todo/api/lists/([^/]+)$', path)
@@ -1824,10 +1748,17 @@ def _cleanup_stale_tmp_files():
 
     崩溃时 tmp 可能残留; 它们不是任务数据(列表只扫 .md), 但会污染
     数据目录。启动时清理一次即可, 正常写入会原子替换。
+
+    ⚠️ 通知状态目录 (``<data_dir>/notify``) **必须跳过**: 那是通知
+    调度器 (另一个系统用户) 的目录, 它的临时文件可能正好在写 ——
+    被这里删掉的话, 调度器的 os.replace 会失败, 投递状态就丢了。
     """
     if not os.path.isdir(TODOLIST_DIR):
         return
+    notify_dir = os.path.abspath(os.path.join(TODOLIST_DIR, NOTIFY_DIR_NAME))
     for root, _dirs, files in os.walk(TODOLIST_DIR):
+        if os.path.abspath(root) == notify_dir:
+            continue
         for fn in files:
             if fn.endswith('.tmp'):
                 try:

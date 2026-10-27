@@ -299,7 +299,155 @@ design** — browser traffic must never be able to carry it (§7 item 7).
 The JSON key must be a **local identity id** (the right-hand side of
 the `Y8Y_USERS` mapping, e.g. `alice`), never an e-mail.
 
-## 9. Run the full test suite and CI
+## 9. Notifications (optional, only if the deployment uses them)
+
+The notification subsystem is opt-in. If the deployment does not install
+`y8y-todo-notify.service` / `.timer`, **skip this section entirely** — the
+Todo app must be unaffected.
+
+> ⚠️ Use **fictional** recipients only. Do not point this at a real LINE
+> account or a real mailbox unless you intend to receive the messages.
+
+> ℹ️ The commands below drive the two **helper units**
+> (`y8y-todo-notify-dry-run.service` and `y8y-todo-notify-test@<user>.service`,
+> see `docs/deployment.md` §5.1) instead of running the runner by hand.
+> They load the credential file through systemd's `EnvironmentFile=`, so
+> the token and the API key never appear in the command line, in the
+> shell history, or in the journal. Install them before continuing:
+>
+> ```bash
+> sudo cp /opt/y8y-todo/packaging/y8y-todo-notify-dry-run.service \
+>         /etc/systemd/system/
+> sudo cp /opt/y8y-todo/packaging/y8y-todo-notify-test@.service \
+>         /etc/systemd/system/
+> sudo systemctl daemon-reload
+> ```
+>
+> ℹ️ The three notification JSON files live in a dedicated `notify/`
+> sub-directory of the data directory (`$DATA/notify/`), not in the data
+> directory root — see `docs/deployment.md` §5.2.4.
+
+```bash
+# 0. Nothing is configured yet → the scheduler must be a no-op, and the
+#    app must not care.
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo systemctl show -p ExecMainStatus y8y-todo-notify-dry-run.service
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
+#    → "notifications disabled (Y8Y_NOTIFY_ENABLED=0)"; ExecMainStatus=0
+```
+
+```bash
+# 1. Master switch on, still no per-user opt-in → still nothing sent.
+sudo -e /etc/y8y-todo/y8y-todo-notify.env     # Y8Y_NOTIFY_ENABLED=1
+sudo systemctl restart y8y-todo-notify.service
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo systemctl show -p ExecMainStatus y8y-todo-notify-dry-run.service
+#    → "no user has enabled notifications"; ExecMainStatus=0
+```
+
+```bash
+# 2. The user opts in in the UI (Settings → Notifications): enable,
+#    pick a channel, set the lead time and the digest time, save.
+#    Then check what would be sent:
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
+#    → "[plan] user=alice channel=line kind=reminder …"
+```
+
+```bash
+# 3. Credential check for one channel (does it actually deliver?).
+#    The instance name is the user id, not a credential.
+sudo systemctl start y8y-todo-notify-test@alice.service
+sudo journalctl -u 'y8y-todo-notify-test@alice.service' -n 50 --no-pager
+#    → "line: sent"
+```
+
+**Pass:** with the subsystem off the app behaves exactly as before; with
+it on but no user opt-in nothing is sent; after opting in the dry-run
+lists the expected reminders; `--test` confirms the credential works.
+
+### 9.1 Privacy checks (must all pass)
+
+```bash
+# a. The web service must NOT be able to read the notification credentials.
+sudo grep -c "EnvironmentFile" /etc/systemd/system/y8y-todo.service
+#    → must not mention y8y-todo-notify.env
+
+# b. The capability table the web app reads must contain no secrets.
+sudo python3 -c "import json;d=json.load(open('$DATA/notify/notification_channels.json'));\
+print(json.dumps(d)[:2000])"
+#    → no token, no api key, no "secret"
+
+# c. Another user's private task must never appear in someone's digest.
+#    Create a private task owned by bob, then dry-run as alice:
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
+#    → bob's private task title must not appear
+
+# d. The credential values must not appear in the journal, in the delivery
+#    state file, or in any process argument list.
+sudo python3 - <<'PY'
+import pathlib, subprocess
+env = pathlib.Path('/etc/y8y-todo/y8y-todo-notify.env').read_text()
+secrets = [line.split('=', 1)[1].strip() for line in env.splitlines()
+           if line.startswith(('Y8Y_NOTIFY_LINE_TOKEN=', 'Y8Y_NOTIFY_EMAIL_API_KEY='))]
+secrets = [s for s in secrets if s]
+journal = subprocess.run(
+    ['journalctl', '-u', 'y8y-todo-notify-dry-run.service', '--no-pager'],
+    capture_output=True, text=True).stdout
+state = pathlib.Path('/var/lib/y8y-todo/notify/notification_state.json')
+blobs = [journal, state.read_text() if state.exists() else '']
+argv = subprocess.run(['ps', '-eo', 'args'], capture_output=True, text=True).stdout
+blobs.append(argv)
+print('LEAK' if any(s in blob for s in secrets for blob in blobs) else 'CLEAN')
+PY
+#    → CLEAN
+```
+
+**Pass:** (a) the web unit never reads the notify env file; (b) no
+credential material in the capability table; (c) no other user's private
+task in any plan; (d) no credential value in the journal, in the state
+file, or in a process argument list.
+
+### 9.2 Idempotency and recovery
+
+```bash
+# Run twice in a row — the second run must not re-send anything.
+sudo systemctl start y8y-todo-notify.service
+sudo systemctl start y8y-todo-notify.service
+sudo python3 -c "import json;print(json.dumps(json.load(open('$DATA/notify/notification_state.json')),indent=2))"
+#    → each occurrence appears exactly once, with its delivery status
+```
+
+**Pass:** a second run produces no duplicate send; the state file
+records the delivery, so a restart of the scheduler does not re-notify.
+
+### 9.3 Credential isolation and permissions (operator acceptance)
+
+On the target Linux host, after the ACL setup and controlled Web restart in
+`docs/deployment.md` §5.2.6, run the audit as root:
+
+```bash
+sudo python3 /opt/y8y-todo/scripts/check-notify-isolation.py \
+    --unit-dir /etc/systemd/system \
+    --env-file /etc/y8y-todo/y8y-todo-notify.env \
+    --data-dir /var/lib/y8y-todo
+```
+
+The audit starts a controlled notify-UID process with a fictional environment;
+no message is sent and no real credential value is read. It checks recursive
+access to both task trees, state-directory access, and denial of token access
+and data-root writes. `UNKNOWN` exits 2 and is not a pass. Confirm the running
+Web service actually acquired its supplementary group after the restart, and
+verify service health. Audit current ACLs and the effective systemd unit and
+its overrides; test creation and atomic replacement of a fictional task in an
+isolated staging tree. Recheck after changes to ACLs, modes, writers or moves.
+The test process does not prove the identity or sandbox of an actual service
+instance. Verify the effective configured UID and running Web MainPID on the
+host separately. The shared `notify/` directory allows either member to replace
+any state file. If acceptance fails, keep Web running and disable the timer.
+
+## 10. Run the full test suite and CI
 
 ```bash
 python3 -m pytest --basetemp=.pytest-tmp -q     # all green (Linux-only
@@ -318,7 +466,7 @@ p4-upgrade-rehearsal.
 **Pass:** suite green locally; all CI checks green on the PR/commit
 under review.
 
-## 10. Report
+## 11. Report
 
 State for each section: PASS/FAIL, the exact commands that failed (if
 any), and anything unexpected (even if it did not fail). Use fictional

@@ -1,0 +1,50 @@
+# y8y Todo 通知调度器 —— 手动渠道测试单元示例 (模板单元)
+# (复制到 /etc/systemd/system/y8y-todo-notify-test@.service)
+#
+# 用途: 给**一个用户**发一条测试通知, 用来验证 LINE token / Resend key
+#       是否有效、收件目标是否配对。
+#
+# 为什么用 systemd 单元而不是手敲命令:
+#   把凭据文件展开进命令行的写法 (env + 命令替换) 会把 LINE token /
+#   Resend key 变成**进程命令行参数** —— 任何能读 /proc/<pid>/cmdline
+#   的用户都能拿到凭据, 也会进 shell 历史, 而且凭据里有空格或特殊
+#   字符时命令会直接解析失败。
+#   EnvironmentFile= 由 systemd 以 root 身份读取后注入进程环境, 凭据
+#   不出现在 argv、不进日志、不进 shell 历史。
+#
+# 安装:
+#   sudo cp /opt/y8y-todo/packaging/y8y-todo-notify-test@.service \
+#           /etc/systemd/system/y8y-todo-notify-test@.service
+#   sudo systemctl daemon-reload
+#
+# 使用:
+#   sudo systemctl start y8y-todo-notify-test@<用户id>.service
+#   sudo journalctl -u 'y8y-todo-notify-test@<用户id>.service' -n 50 --no-pager
+#
+# ⚠️ 实例名 (%i) 是**用户 id**, 不是凭据 —— 它必须是 Y8Y_USERS 里
+#    邮箱右侧的那一串, 且只含字母/数字/._- (别放空格, systemd 按空白
+#    切 ExecStart 参数)。
+# ⚠️ 输出是脱敏过的: 凭据值会以 *** 出现, 不会写进 journald。
+[Unit]
+Description=y8y Todo notification test for user %i (one-shot)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 与正式调度单元同一个独立用户 (docs/deployment.md §5.2)
+User=y8y-notify
+Group=y8y-notify
+WorkingDirectory=/opt/y8y-todo/src
+# 与正式调度单元完全一致的环境文件 (凭据只在这里, 不进仓库、不进 argv)
+EnvironmentFile=-/etc/y8y-todo/y8y-todo.env
+EnvironmentFile=-/etc/y8y-todo/y8y-todo-notify.env
+ExecStart=/usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --test %i
+# 与正式调度单元一致的加固: 唯一可写路径是通知状态目录
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=-/var/lib/y8y-todo/notify
+PrivateTmp=true
+UMask=0022
+TimeoutStartSec=600

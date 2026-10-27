@@ -1,0 +1,48 @@
+# y8y Todo 通知调度器 —— 手动 dry-run 单元示例
+# (复制到 /etc/systemd/system/y8y-todo-notify-dry-run.service)
+#
+# 用途: 手动跑一次"只算不发送", 看看调度器**本来**会发什么。
+#       与 y8y-todo-notify.timer 驱动的正式调度完全同源 —— 同样的环境
+#       文件、同样的加固、同样的数据目录, 唯一的区别是加了 --dry-run。
+#
+# 为什么用 systemd 单元而不是手敲命令:
+#   把凭据文件展开进命令行的写法 (env + 命令替换) 会把 LINE token /
+#   Resend key 变成**进程命令行参数** —— 任何能读 /proc/<pid>/cmdline
+#   的用户都能拿到凭据, 也会进 shell 历史, 而且凭据里有空格或特殊
+#   字符时命令会直接解析失败。
+#   EnvironmentFile= 由 systemd 以 root 身份读取后注入进程环境, 凭据
+#   不出现在 argv、不进日志、不进 shell 历史。
+#
+# 安装:
+#   sudo cp /opt/y8y-todo/packaging/y8y-todo-notify-dry-run.service \
+#           /etc/systemd/system/y8y-todo-notify-dry-run.service
+#   sudo systemctl daemon-reload
+#
+# 使用:
+#   sudo systemctl start y8y-todo-notify-dry-run.service
+#   sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
+#
+# ⚠️ 输出是脱敏过的: 凭据值会以 *** 出现, 不会写进 journald。
+[Unit]
+Description=y8y Todo notification scheduler (dry-run, sends nothing)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 与正式调度单元同一个独立用户 (docs/deployment.md §5.2)
+User=y8y-notify
+Group=y8y-notify
+WorkingDirectory=/opt/y8y-todo/src
+# 与正式调度单元完全一致的环境文件 (凭据只在这里, 不进仓库、不进 argv)
+EnvironmentFile=-/etc/y8y-todo/y8y-todo.env
+EnvironmentFile=-/etc/y8y-todo/y8y-todo-notify.env
+ExecStart=/usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
+# 与正式调度单元一致的加固: 唯一可写路径是通知状态目录
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=-/var/lib/y8y-todo/notify
+PrivateTmp=true
+UMask=0022
+TimeoutStartSec=600
