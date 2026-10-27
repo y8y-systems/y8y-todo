@@ -541,6 +541,29 @@ def test_runner_reports_the_hardened_state_in_its_output(tmp_path, monkeypatch, 
 AUDIT_PY = REPO / 'scripts' / 'check-notify-isolation.py'
 AUDIT_SH = REPO / 'scripts' / 'check-notify-isolation.sh'
 
+
+def test_missing_environ_is_unknown_not_denied():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('notify_audit', AUDIT_PY)
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    # Simulate a process disappearing between discovery and the read.
+    from unittest.mock import patch
+    with patch.object(audit, '_drop_to', return_value=None):
+        assert audit._read_as_user(os.getuid(), os.getgid(), [],
+                                   '/proc/999999999/environ') is None
+
+
+@pytest.mark.parametrize('returncode, expected', [(0, True), (10, False), (1, None), (11, None), (3, None), (-9, None)])
+def test_read_probe_does_not_confuse_errors_with_denial(returncode, expected, monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+    spec = importlib.util.spec_from_file_location('notify_audit', AUDIT_PY)
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    monkeypatch.setattr(subprocess, 'run', lambda *a, **kw: SimpleNamespace(returncode=returncode))
+    assert audit._read_as_user(1, 1, [], '/unused') is expected
+
 # 会改动系统的命令 —— 审计脚本里出现任何一个都是 bug。
 # 注意: os.setuid / os.setgid **不算**在这里 —— 审计脚本要"降权到目标
 # 用户"才能做跨用户读取实测, 那是子进程里的降权, 不是对系统的改动;

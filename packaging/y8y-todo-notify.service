@@ -41,6 +41,7 @@
 #           --shell /usr/sbin/nologin y8y-notify
 #   sudo usermod --append --groups y8y-notify y8y
 #   sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+#   Apply task ACLs and restart Web in a controlled window: docs/deployment.md §5.2.6
 #
 # 想先看看会发什么 (不发送):
 #   sudo systemctl start y8y-todo-notify-dry-run.service
@@ -78,7 +79,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 # 前缀 '-' = 目录不存在时不报错 (调度器会给出明确的失败提示, 而不是
-# 整个单元起不来)。数据目录本身可读 (要扫任务), 只有状态目录可写。
+# 整个单元起不来)。数据根仅穿越, 任务树按 ACL 只读, 仅状态目录可写。
 ReadWritePaths=-/var/lib/y8y-todo/notify
 PrivateTmp=true
 # 文件权限跟随 umask (0022) —— 状态文件 group 可读, 另一个账号才读得到

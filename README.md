@@ -228,8 +228,8 @@ the digest time.
   permission bit or unit option.
 - The two accounts share exactly one directory, `notify/` under the data
   directory, and nothing else: the scheduler may not write the task tree
-  nor the machine-to-machine credential file, and the web app may not
-  rewrite the delivery state.
+  nor the machine-to-machine credential file. Both accounts can replace
+  any file in the shared notification state directory.
 - Only tasks the recipient may see are ever considered: a task owned by
   another user is never included in somebody else's digest or reminder,
   and shared tasks are delivered once per entitled user.
@@ -266,6 +266,8 @@ sudo useradd --system --user-group --no-create-home \
         --shell /usr/sbin/nologin y8y-notify
 sudo usermod --append --groups y8y-notify y8y
 sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+# Apply the task ACLs and perform the controlled Web restart in
+# docs/deployment.md §5.2.6 before continuing.
 
 # 1. Units + env file (credentials stay on the server, root:root 600).
 sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.{service,timer} \
@@ -281,7 +283,8 @@ sudo -e /etc/y8y-todo/y8y-todo-notify.env     # token / api key / targets
 
 # 2. Run the timer.
 sudo systemctl daemon-reload
-sudo systemctl enable --now y8y-todo-notify.timer
+sudo python3 /opt/y8y-todo/scripts/check-notify-isolation.py && \
+    sudo systemctl enable --now y8y-todo-notify.timer
 systemctl list-timers y8y-todo-notify.timer
 ```
 

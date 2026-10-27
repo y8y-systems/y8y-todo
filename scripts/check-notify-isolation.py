@@ -8,13 +8,13 @@
   C1  单元的运行用户: Web 与调度器必须不是同一个 UID
   C2  凭据文件权限:    必须是 root 拥有, 且 group/other 不可读;
                        并且 Web 单元**不得**引用凭据文件
-  C3  运行中调度器的实际 UID: 必须与 Web 单元的用户不同
-  C4  跨用户读取实测:  以 Web 用户身份读调度器的 /proc/<pid>/environ 必须失败
+  C3  受控测试进程的实际 UID: 必须为调度器 UID 且与 Web UID 不同
+  C4  跨用户读取实测:  以 Web 用户身份读测试进程的 environ 必须明确被拒
   C5  调度器对数据目录: 必须能读任务目录与用户偏好, 且**能写状态目录**
   C6  Web 对状态目录:   必须能读能力表、写用户偏好
   C7  通知单元的可写范围: 不得覆盖整个数据目录 (那里有机器凭据)
 
-**这个脚本只读不写** —— 不建用户、不改权限、不启停单元、不碰凭据内容。
+不改持久状态: 启动只含虚构环境的短暂探针; 不建用户、不改权限、不启停单元、不读真实凭据。
 
 **Fail closed**: 需要 root 才能完成的检查项, 在非 root 环境下标记为
 "无法验证"而不是"通过"; 判定不了 (降权失败、子进程起不来) 同样算
@@ -39,6 +39,8 @@ import argparse
 import grp
 import os
 import pwd
+import select
+import subprocess
 import sys
 from pathlib import Path
 
@@ -115,34 +117,38 @@ def _uid_gid(name):
     return entry.pw_uid, entry.pw_gid, groups
 
 
-def _find_notify_process():
-    """找运行中的通知调度器进程 (按 cmdline 判定)。返回 (pid, uid) 或 (None, None)。
-
-    没有 /proc 的平台 (非 Linux) → (None, None) —— 调用方会记成"无法验证",
-    而不是让脚本崩掉。
-    """
-    try:
-        entries = list(Path('/proc').iterdir())
-    except OSError:
+def _probe_isolation(web_ids, notify_ids):
+    """Keep a synthetic, credential-free notify-user process alive for C3/C4."""
+    if os.geteuid() != 0 or not web_ids or not notify_ids or not Path('/proc/self/status').exists():
         return None, None
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            cmdline = (entry / 'cmdline').read_bytes().decode('utf-8', 'replace')
-        except OSError:
-            continue
-        if 'notify_runner.py' not in cmdline:
-            continue
-        try:
-            status = (entry / 'status').read_text(encoding='utf-8')
-        except OSError:
-            continue
-        for line in status.splitlines():
-            if line.startswith('Uid:'):
-                uid = int(line.split()[1])
-                return int(entry.name), uid
-    return None, None
+    child = None
+    try:
+        child = subprocess.Popen(
+            [sys.executable, '-c', 'import sys; print("ready", flush=True); sys.stdin.read(1)'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={'Y8Y_AUDIT_SYNTHETIC': 'probe'},
+            preexec_fn=_drop_to(*notify_ids), text=True)
+        ready, _, _ = select.select([child.stdout], [], [], 5)
+        if not ready or child.stdout.readline().strip() != 'ready':
+            return None, None
+        status = Path(f'/proc/{child.pid}/status').read_text(encoding='utf-8')
+        uids = [int(x) for x in next(x for x in status.splitlines() if x.startswith('Uid:')).split()[1:]]
+        uid_ok = len(uids) == 4 and all(uid == notify_ids[0] for uid in uids) and notify_ids[0] != web_ids[0]
+        denied = _read_as_user(*web_ids, f'/proc/{child.pid}/environ')
+        if child.poll() is not None:
+            denied = None
+        return uid_ok, None if denied is None else not denied
+    except (OSError, ValueError, StopIteration):
+        return None, None
+    finally:
+        if child is not None:
+            child.stdin.close()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+            child.stdout.close()
 
 
 def _drop_to(uid, gid, groups):
@@ -172,18 +178,20 @@ def _read_as_user(uid, gid, groups, path):
         import subprocess
         proc = subprocess.run(
             [sys.executable, '-c',
-             'import sys\n'
+             'import errno, sys\n'
              'try:\n'
              '    open(sys.argv[1], "rb").read(1)\n'
-             'except Exception:\n'
-             '    sys.exit(1)\n'
+             'except OSError as exc:\n'
+             '    sys.exit(10 if exc.errno in (errno.EACCES, errno.EPERM) else 11)\n'
              'sys.exit(0)\n', path],
             preexec_fn=_drop_to(uid, gid, groups), capture_output=True)
     except (OSError, ImportError):
         return None
-    if proc.returncode == 3:
-        return None                       # 降权失败
-    return proc.returncode == 0           # 0 = 读到了
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 10:
+        return False                      # 仅权限拒绝才算安全
+    return None                           # 消失、降权失败等均无法判定
 
 
 def _access_as(uid, gid, groups, path, mode):
@@ -205,9 +213,9 @@ def _access_as(uid, gid, groups, path, mode):
             preexec_fn=_drop_to(uid, gid, groups), capture_output=True)
     except (OSError, ImportError):
         return None                         # 判不了 → 判不了
-    if proc.returncode == 3:
-        return None                         # 降权失败 → 判不了
-    return proc.returncode == 0
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    return None                             # 异常退出 → 判不了
 
 
 def _path_covers(candidate, target):
@@ -234,6 +242,7 @@ def main(argv=None):
     parser.add_argument('--state-dir', default='',
                         help='通知状态目录 (默认 <data-dir>/notify)')
     args = parser.parse_args(argv)
+    _results.clear()
 
     unit_dir = Path(args.unit_dir)
     if args.repo_packaging:
@@ -298,39 +307,16 @@ def main(argv=None):
         _record(OK, 'C2b Web 单元不引用凭据文件',
                 f'{web_unit} 没有引用 {NOTIFY_ENV_NAME}')
 
-    # ── C3 运行中调度器的实际 UID ──────────────────────────────────────
-    pid, notify_uid = _find_notify_process()
+    # A controlled child has only a fictional environment; it cannot send.
     web_ids = _uid_gid(web_user) if web_user else None
-    if pid is None:
-        _record(UNKNOWN, 'C3 运行中调度器的 UID',
-                '没找到运行中的 notify_runner.py —— 调度器此刻没在跑')
-    elif web_ids is None:
-        _record(UNKNOWN, 'C3 运行中调度器的 UID',
-                f'pid={pid} uid={notify_uid}; 但用户 {web_user!r} 在本机不存在')
-    elif notify_uid == web_ids[0]:
-        _record(FAIL, 'C3 运行中调度器的 UID',
-                f'pid={pid} 以 uid={notify_uid} 运行, 与 Web 相同')
-    else:
-        _record(OK, 'C3 运行中调度器的 UID',
-                f'pid={pid} uid={notify_uid} ≠ Web 的 {web_ids[0]}')
-
-    # ── C4 跨用户读取实测 ──────────────────────────────────────────────
-    if pid is None:
-        _record(UNKNOWN, 'C4 跨用户读取实测', '没有运行中的调度器进程, 无从测起')
-    elif os.geteuid() != 0:
-        _record(UNKNOWN, 'C4 跨用户读取实测', '需要 root 才能降权到 Web 用户去读')
-    elif web_ids is None:
-        _record(UNKNOWN, 'C4 跨用户读取实测', f'用户 {web_user!r} 在本机不存在')
-    else:
-        leaked = _read_as_user(web_ids[0], web_ids[1], web_ids[2], f'/proc/{pid}/environ')
-        if leaked is None:
-            _record(UNKNOWN, 'C4 跨用户读取实测', '降权失败, 无法判定')
-        elif leaked:
-            _record(FAIL, 'C4 跨用户读取实测',
-                    f'Web 用户能读到调度器 (pid={pid}) 的 environ —— 凭据可被直接读走')
-        else:
-            _record(OK, 'C4 跨用户读取实测',
-                    f'Web 用户读调度器 (pid={pid}) 的 environ 被拒 —— 凭据不可达')
+    notify_ids = _uid_gid(notify_user) if notify_user else None
+    uid_ok, denied = _probe_isolation(web_ids, notify_ids)
+    for label, result, good, bad in (
+        ('C3 探针的 UID', uid_ok, '探针实际 UID 与配置一致且不同于 Web', '探针 UID 不符或与 Web 相同'),
+        ('C4 跨用户读取实测', denied, 'Web 用户读取虚构探针 environ 被拒', 'Web 用户能读取探针 environ'),
+    ):
+        _record(UNKNOWN if result is None else OK if result else FAIL, label,
+                '无法验证 (需要 root 和 Linux /proc)' if result is None else good if result else bad)
 
     # ── C5 调度器对数据目录 / 状态目录的访问权 ─────────────────────────
     notify_ids = _uid_gid(notify_user) if notify_user else None
@@ -347,19 +333,59 @@ def main(argv=None):
         problems = []
         undecidable = []
         needed = [
-            (data_dir, os.R_OK | os.X_OK, '读+进入数据目录'),
-            (data_dir / 'todo', os.R_OK | os.X_OK, '读任务目录'),
+            (data_dir, os.X_OK, '穿越数据目录'),
             (state_dir, os.R_OK | os.X_OK, '进入状态目录'),
             (state_dir, os.W_OK | os.X_OK, '在状态目录里创建文件 (投递状态)'),
         ]
         for path, mode, what in needed:
             if not path.exists():
-                continue                        # 还没生成 → 跳过
+                undecidable.append(f'{what} (missing)')
+                continue
             verdict = _access_as(n_uid, n_gid, n_groups, path, mode)
             if verdict is None:
                 undecidable.append(f'{what} ({path})')
             elif not verdict:
                 problems.append(f'{what} ({path})')
+        settings = state_dir / 'notification_settings.json'
+        if settings.exists():
+            verdict = _access_as(n_uid, n_gid, n_groups, settings, os.R_OK)
+            if verdict is None:
+                undecidable.append('settings permission probe unavailable')
+            elif not verdict:
+                problems.append('settings inaccessible')
+        # The scheduler recursively scans both trees. Never log task names.
+        for folder in ('todo', 'recurring'):
+            root = data_dir / folder
+            if not root.is_dir() or root.is_symlink():
+                undecidable.append(f'{folder} missing or symlink')
+                continue
+            def onerror(_exc):
+                undecidable.append(f'{folder} traversal failed')
+            for current, dirs, files in os.walk(root, followlinks=False, onerror=onerror):
+                for name in dirs + files:
+                    if (Path(current) / name).is_symlink():
+                        undecidable.append(f'{folder} contains a symlink')
+                checks = [(Path(current), os.R_OK | os.X_OK)]
+                checks.extend((Path(current) / name, os.R_OK) for name in files if name.endswith('.md'))
+                for path, mode in checks:
+                    verdict = _access_as(n_uid, n_gid, n_groups, path, mode)
+                    if verdict is None:
+                        undecidable.append(f'{folder} permission probe unavailable')
+                    elif not verdict:
+                        problems.append(f'{folder} task tree inaccessible')
+                        break
+        # Root write permits replacing tokens even when the file itself is read-only.
+        for path, mode, label in ((data_dir, os.W_OK, 'data root writable'),
+                                  (data_dir / 'internal_tokens.json', os.R_OK, 'token readable'),
+                                  (data_dir / 'internal_tokens.json', os.W_OK, 'token writable')):
+            if not path.exists():
+                undecidable.append(f'{label}: path missing')
+                continue
+            verdict = _access_as(n_uid, n_gid, n_groups, path, mode)
+            if verdict is None:
+                undecidable.append(f'{label}: cannot check')
+            elif verdict:
+                problems.append(label)
         # 状态目录的属组必须同时装得下两个账号 —— 否则一边能写另一边不能
         if state_dir.exists():
             try:
@@ -376,7 +402,7 @@ def main(argv=None):
                         continue
                     if ids[0] == info.st_uid:
                         continue                    # 属主 —— 天然有权限
-                    if ids[0] == info.st_gid:
+                    if ids[1] == info.st_gid:
                         continue                    # 主组就是目录的属组
                     if info.st_gid in ids[2]:
                         continue                    # 附加组里有目录的属组
@@ -388,7 +414,7 @@ def main(argv=None):
                 undecidable.append(f'读状态目录的属组失败 ({exc})')
         if problems:
             _record(FAIL, 'C5 调度器的访问权',
-                    '调度器用户缺少: ' + '; '.join(problems))
+                    '权限检查失败: ' + '; '.join(problems))
         elif undecidable:
             _record(UNKNOWN, 'C5 调度器的访问权',
                     '判不了: ' + '; '.join(undecidable))

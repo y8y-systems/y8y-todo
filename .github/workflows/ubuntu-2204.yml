@@ -97,6 +97,14 @@ jobs:
           id "$Y8Y_USER"
           test "$(id -u "$Y8Y_USER")" -ne 0 || { echo "must not be root"; exit 1; }
 
+      - name: Verify notification ACLs and synthetic cross-UID probe
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq acl
+          sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin y8y-notify
+          sudo usermod --append --groups y8y-notify y8y
+          sudo bash tests/linux_notify_acl.sh
+
       - name: Install the code to /opt/y8y-todo (root-owned, world-readable)
         run: |
           sudo mkdir -p /opt/y8y-todo

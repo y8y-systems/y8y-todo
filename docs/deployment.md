@@ -465,14 +465,16 @@ measurement behind it, and the rollback.
 
 #### Install
 
-First create the scheduler's account and the shared state directory
-(details and rollback in §5.2.6):
+First follow the complete account, ACL, state directory and controlled Web restart
+procedure in §5.2.6. The abbreviated commands below are not sufficient on
+a private data directory:
 
 ```bash
 sudo useradd --system --user-group --no-create-home \
         --shell /usr/sbin/nologin y8y-notify
 sudo usermod --append --groups y8y-notify y8y
 sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+# Apply the task ACLs and restart Web as described in §5.2.6 before proceeding.
 ```
 
 Then install the units:
@@ -491,7 +493,9 @@ sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.env.example \
 sudo chmod 600 /etc/y8y-todo/y8y-todo-notify.env   # root:root
 sudo -e /etc/y8y-todo/y8y-todo-notify.env          # fill in token / api key / targets
 sudo systemctl daemon-reload
-sudo systemctl enable --now y8y-todo-notify.timer
+# Follow §5.2.8 and verify all checks before enabling the timer.
+sudo python3 /opt/y8y-todo/scripts/check-notify-isolation.py && \
+    sudo systemctl enable --now y8y-todo-notify.timer
 ```
 
 All three scheduler units read `/etc/y8y-todo/y8y-todo.env` as well
@@ -710,23 +714,24 @@ sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
 Why each piece is there:
 
 - **group `y8y-notify` (2770)** — both accounts are members, so both
-  may create and rename files in the directory, and neither may touch
-  anything outside it. "Other" has no access at all.
+  may create and rename files in the directory. "Other" has no access
+  to this directory. Web retains access to its data outside it.
 - **setgid (the `2`)** — every file created in the directory inherits
   the group, so the file one account writes stays readable by the
   other even after `os.replace()` swaps in a fresh inode. Without it
   the group would revert to the writer's primary group on every write.
 - **umask 0022** (both units) — files land as `0644`, i.e. readable by
-  the other account, and **not** writable by it: only the scheduler may
-  rewrite its own delivery state.
+  the other account. Either group member can replace or delete any file
+  through the writable directory, regardless of the file mode.
 - **`ReadWritePaths=-/var/lib/y8y-todo/notify`** in the notify unit —
   a systemd-level allowlist on top of the Unix permissions. The data
   directory root is read-only for the scheduler, so even a compromised
   scheduler cannot replace `internal_tokens.json`.
 
-The data directory root itself stays owned by `y8y` and world-readable
-for the task files; the scheduler only ever *reads* tasks (it computes
-digests for every user) and writes inside its own state directory.
+The data directory root stays private. A named-user ACL grants only traversal
+to `y8y-notify`; named and default ACLs on `todo/` and `recurring/` grant
+read access to their task trees (§5.2.6). The scheduler reads all users’
+active tasks and writes only its shared state directory.
 
 > If the operator skips the `install -d` step, the web app creates the
 > directory on its first write — owned by `y8y`, group `y8y`, and the
@@ -792,55 +797,55 @@ Y8Y_NOTIFY_KEEP_DUMPABLE=1   # keep core dumps / gdb attach for this run
 
 The notification units are optional: a deployment that never installs
 them never creates the second account and is unaffected. Installing them
-requires three preparation steps — **before** the units are started.
+requires the following preparation **before** the timer is enabled. Adapt
+paths and account names to the installed unit. Install the Linux `acl` tools
+using the operator's normal change process. Back up ACL metadata and review
+existing ACLs, masks, ownership and symlinks before changing anything; ACL
+mask recalculation can affect existing group permissions. Do not recursively
+follow symlinks. Resolve any symlinks in the two task trees before proceeding.
 
 ```bash
-# 1. The scheduler's own system account (and its group).
 sudo useradd --system --user-group --no-create-home \
         --shell /usr/sbin/nologin y8y-notify
-
-# 2. The web account joins that group, so it can write the user
-#    preferences into the shared state directory.
 sudo usermod --append --groups y8y-notify y8y
-
-# 3. The state directory itself: owned by the scheduler, shared group,
-#    setgid so new files inherit the group.
 sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+# Create the two task roots as Web if absent, preserving existing directories.
+sudo -u y8y mkdir -p /var/lib/y8y-todo/todo /var/lib/y8y-todo/recurring
+# Only traversal at the private root: no listing or writing.
+sudo setfacl -m u:y8y-notify:--x /var/lib/y8y-todo
+# Existing directories: read and traverse. Default ACLs inherit into newly
+# created directories and files (including atomic_write's replacement files).
+sudo find -P /var/lib/y8y-todo/todo /var/lib/y8y-todo/recurring -type d \
+    -exec setfacl -m u:y8y-notify:r-x,d:u:y8y-notify:r-x {} +
+# Existing Markdown tasks only.
+sudo find -P /var/lib/y8y-todo/todo /var/lib/y8y-todo/recurring -type f -name '*.md' \
+    -exec setfacl -m u:y8y-notify:r-- {} +
+# A running service does not acquire supplementary groups after usermod.
+# Schedule this controlled restart and verify Web health before enabling timer.
+sudo systemctl restart y8y-todo.service
 ```
 
-Then install the units as in §5.1 and enable the timer:
+Default ACLs can grant read access to other newly created files *inside these
+ two task trees*, not just Markdown files. Do not put credentials there.
+Restrictive creation modes, later chmod/ACL changes, moving a pre-existing file
+into the tree, alternate writers or symlinks can defeat inheritance; re-audit
+and repair such cases. The audit checks current files, not every future writer.
+The `internal_tokens.json` file must exist and remain inaccessible to the
+notification account; do not grant ACLs on it. Both accounts can replace any
+file in `notify/`: this directory is a shared trust boundary, not a state
+integrity boundary between Web and the scheduler.
 
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now y8y-todo-notify.timer
-```
-
-Notes:
-
-- `useradd --user-group` creates the group `y8y-notify` with the same
-  name. The web account is added to it as a **supplementary** group;
-  systemd applies the account's supplementary groups when it starts the
-  unit, so the web service can write the preferences without changing
-  its primary group.
-- The scheduler has **no home directory** and `nologin` — it is a
-  service account, never a login.
-- Step 3 must run **before** the first start. If the web app creates
-  the directory first, it gets the wrong owner and the scheduler cannot
-  write its delivery state (see the fail-closed note in §5.2.4).
-- The scheduler reads every user's task files (it computes digests for
-  all of them). That is not a widening — the web account already could —
-  but the account must be treated as trusted: no shell, no home.
-
-**Rollback** (back to a single account, if the second one causes
-trouble) — the data files are not rewritten by any of this:
+Then install the units as in §5.1, run the audit in §5.2.8, and enable the
+timer only after all checks pass. If setup fails, leave Todo Web running and
+disable the timer:
 
 ```bash
 sudo systemctl disable --now y8y-todo-notify.timer
-sudo sed -i 's/^User=.*/User=y8y/' /etc/systemd/system/y8y-todo-notify.service
-sudo systemctl daemon-reload
-# 状态目录归回 Web 账号, 调度器仍然能写
-sudo chown -R y8y:y8y /var/lib/y8y-todo/notify
 ```
+
+Do not switch the scheduler to the Web UID as a fallback. Preserve data and
+investigate or revert only the specific changes under the operator's change
+procedure. No production operations are performed by this repository's CI.
 
 **Acceptance.** Run the audit script from §5.2.8 as root: every check
 must report `OK` and the script must exit `0`.
@@ -850,21 +855,22 @@ must report `OK` and the script must exit `0`.
 | | may | may not |
 | --- | --- | --- |
 | tasks | read | write, rename, delete |
-| `notification_settings.json` | read | write (the web owns the preferences) |
+| `notification_settings.json` | read, replace | — |
 | `notification_state.json` | write | — |
 | `notification_channels.json` | write | — |
 | `internal_tokens.json` | — | read *or* write |
 | the credential file | read (via systemd) | — |
 
-The web account is the mirror image: it may write the preferences and
-read the capability table, but it cannot rewrite the delivery state.
+Both accounts can create, replace, and delete every file in the shared
+state directory. File mode 0644 does not prevent directory-level replacement.
 
 #### 5.2.8 Audit script
 
 `scripts/check-notify-isolation.py` (wrapper: `scripts/check-notify-isolation.sh`)
-is a **read-only** audit. It never creates a user, never changes a
-mode, never starts or stops a unit, and never reads the credential
-*values* (only the file's ownership and permission bits).
+is an audit that does not change persistent host state. It starts a short-lived
+process under the notify UID with a fictional environment, and reads no real
+credential values. It never creates a user, changes permissions, or starts or
+stops a service.
 
 ```bash
 # On the target host, as root:
@@ -879,15 +885,14 @@ sudo python3 scripts/check-notify-isolation.py \
 | C1 | the web unit and the notify unit do **not** run as the same user |
 | C2 | the credential file is owned by root and unreadable by group/other |
 | C2b | the web unit does **not** reference the credential file |
-| C3 | the running scheduler's UID differs from the web user's |
-| C4 | measured: the web user cannot read the scheduler's `/proc/<pid>/environ` |
-| C5 | the scheduler user can read the task tree and **write the state directory** |
+| C3 | a controlled probe has the notify UID, distinct from the Web UID |
+| C4 | measured: the Web identity cannot read the controlled probe’s `/proc/<pid>/environ` |
+| C5 | both task trees and Markdown files are accessible, state directory writable, root not writable and internal token inaccessible |
 | C6 | the web user can read the capability table and write the preferences |
 | C7 | the notify unit's writable paths do **not** cover the whole data directory |
 
 Exit codes: `0` = all checks passed, `1` = a check failed, `2` = a
-check could not be verified (for example C4 needs root and a running
-scheduler). **`2` is not a pass.** Checks that cannot be decided are
+check could not be verified (for example C4 needs root and Linux `/proc`). **`2` is not a pass.** Checks that cannot be decided are
 reported as `UNKNOWN` on purpose: a container or an unprivileged shell
 cannot emulate the target host's `/proc` and systemd behaviour, and
 this project does not want a simulated result presented as a
