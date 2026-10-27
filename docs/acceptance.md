@@ -366,6 +366,42 @@ sudo journalctl -u 'y8y-todo-notify-test@alice.service' -n 50 --no-pager
 it on but no user opt-in nothing is sent; after opting in the dry-run
 lists the expected reminders; `--test` confirms the credential works.
 
+### 9.0 Shared-task policy (the shipped defaults)
+
+The scheduler announces **shared tasks only** (`Y8Y_NOTIFY_TASK_SCOPE=shared`),
+digests them once a day at **06:00** Asia/Tokyo, reminds **30 minutes**
+before a task that has a clock time, and never sends anything late.
+
+```bash
+# The scope and the window are visible in the runner's own summary line.
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
+#    → "notify=on channels=line scope=shared window=10m recipients=kara"
+```
+
+Acceptance points, all verifiable from the dry-run output and the state
+file:
+
+```bash
+sudo python3 -c "import json;d=json.load(open('$DATA/notify/notification_state.json'));\
+print(json.dumps(d,ensure_ascii=False,indent=2)[:4000])"
+```
+
+- a **private** task (`owner: <user>`) never appears in a plan, a digest
+  or a reminder — not even for its own owner;
+- a **shared** task due today with a clock time appears both in the
+  06:00 digest and in its own 30-minutes-before reminder;
+- a **shared all-day** task due today appears in the digest only;
+- an **overdue** task (due before today) appears in neither;
+- a task whose window has passed is recorded as `missed`, and a digest
+  missed at 06:00 is recorded as `missed` too — neither is sent later;
+- one entry per occurrence — re-running the scheduler never produces a
+  second message for the same occurrence.
+
+**Pass:** the digest contains exactly the shared tasks due *today*, the
+overdue and the private ones are absent, and a second run produces no
+new message.
+
 ### 9.1 Privacy checks (must all pass)
 
 ```bash

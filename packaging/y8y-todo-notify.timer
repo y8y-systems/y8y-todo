@@ -9,6 +9,12 @@
 #   - 调度器很轻: 扫一遍任务文件, 比对状态, 发送。真实数据量下 < 1 秒。
 #   - 太频繁会让第三方 API 额度白烧, 太稀疏会让提醒不准。
 #
+# 为什么 Persistent=false:
+#   通知是 **at-most-once** 的 —— 错过的时刻不补发。机器关机/休眠错过了
+#   某一轮, 开机后**不要**补跑: 补跑那一轮也不会把错过的通知发出去
+#   (调度器只在自己的触发窗口内发), 只是白跑一次。真正需要的是开机后
+#   继续按 5 分钟轮询, 覆盖"开机之后"新到达的触发时刻。
+#
 # 安装 (与 .service 配套):
 #   sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.timer \
 #           /etc/systemd/system/y8y-todo-notify.timer
@@ -31,8 +37,8 @@ Documentation=file:/opt/y8y-todo/README.md
 OnBootSec=2min
 # 之后每 5 分钟一次
 OnUnitActiveSec=5min
-# 关机/休眠错过的那一次, 开机后补跑 (Persistent=true)
-Persistent=true
+# 关机/休眠错过的那一次**不补跑** (错过的通知不补发 —— 见上文)
+Persistent=false
 # 允许 systemd 把触发时间对齐到整分钟 (最多 ±1 分钟误差)
 AccuracySec=1min
 Unit=y8y-todo-notify.service

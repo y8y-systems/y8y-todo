@@ -20,7 +20,9 @@ Exit codes:
 
 The runner never raises on a provider failure — a broken LINE token must
 not turn into a crash loop that fills the journal.  Delivery failures are
-recorded in the state file and retried with backoff on the next tick.
+recorded in the state file as a **final** outcome: nothing is retried, and
+a notification whose window has passed is dropped instead of fired late
+(at-most-once).
 """
 import argparse
 import json
@@ -174,6 +176,10 @@ def main(argv=None):
                   f'error={item.get("error", "")}')
         for item in report.get('skipped', []):
             print(f'  [skip] {item.get("user", "-")} {item.get("reason", "")}')
+        # 错过的单点提醒只报个数 —— 逐条列会让 journal 被刷屏。
+        missed = report.get('missed_reminders', 0)
+        if missed:
+            print(f'  [missed] {missed} reminder window(s) expired — not sent late')
     return 0
 
 

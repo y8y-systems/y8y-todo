@@ -96,7 +96,8 @@ def test_notification_settings_api_never_leaks_other_users(server):
     client.put('/todo/api/notification-settings', headers=ALICE,
                body={'enabled': True, 'channels': ['line'], 'lead_minutes': 45})
     status, body = client.get('/todo/api/notification-settings', headers=BOB)
-    assert body['settings']['lead_minutes'] == 0
+    # bob 没设置过 → 拿到的是默认口径 (提前 30 分钟), 不是 alice 的 45
+    assert body['settings']['lead_minutes'] == 30
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -123,39 +124,53 @@ def _scheduler_for_server(server, now, provider):
                      now=now, tz=TZ)
 
 
+def _future_due(hours_ahead=2):
+    """一个将来的截止时刻 —— 提醒目标 = 截止时刻 − 30 分钟。"""
+    return (datetime.now(TZ) + timedelta(hours=hours_ahead)).replace(
+        second=0, microsecond=0)
+
+
+def _remind_at(due):
+    """提醒时刻 (默认提前 30 分钟)。"""
+    return due - timedelta(minutes=30)
+
+
 def test_completed_task_is_not_reminded_again(server):
     _serve, _httpd, client, _tmp = server
-    today = datetime.now(TZ).date().isoformat()
+    due = _future_due()
     status, body = client.post('/todo/api/tasks', headers=ALICE, body={
-        'title': '要完成的任务', 'due': today, 'due_time': '00:01'})
+        'title': '要完成的任务', 'due': due.date().isoformat(),
+        'due_time': due.strftime('%H:%M'), 'owner': 'shared'})
     assert status == 201
     task_id = body['id']
 
     provider = FakeProvider()
-    report = _scheduler_for_server(server, datetime.now(TZ), provider).run()
+    report = _scheduler_for_server(server, _remind_at(due), provider).run()
     assert len(report['sent']) == 1
 
     # 完成 → 不再提醒
     status, _body = client.post(f'/todo/api/tasks/{task_id}/done', headers=ALICE)
     assert status == 200
-    report = _scheduler_for_server(server, datetime.now(TZ), provider).run()
+    report = _scheduler_for_server(server, _remind_at(due), provider).run()
     assert report['sent'] == []
     assert len(provider.sent) == 1
 
 
 def test_deleted_task_is_not_reminded_again(server):
     _serve, _httpd, client, _tmp = server
-    today = datetime.now(TZ).date().isoformat()
+    due = _future_due()
     status, body = client.post('/todo/api/tasks', headers=ALICE, body={
-        'title': '要删除的任务', 'due': today, 'due_time': '00:01'})
+        'title': '要删除的任务', 'due': due.date().isoformat(),
+        'due_time': due.strftime('%H:%M'), 'owner': 'shared'})
+    assert status == 201
     task_id = body['id']
 
     provider = FakeProvider()
-    assert len(_scheduler_for_server(server, datetime.now(TZ), provider).run()['sent']) == 1
+    assert len(_scheduler_for_server(server, _remind_at(due), provider).run()['sent']) == 1
 
     status, _body = client.delete(f'/todo/api/tasks/{task_id}', headers=ALICE)
     assert status == 200
-    report = _scheduler_for_server(server, datetime.now(TZ), provider).run()
+    report = _scheduler_for_server(server, _remind_at(due), provider).run()
     assert report['sent'] == []
     assert len(provider.sent) == 1
 
@@ -163,43 +178,45 @@ def test_deleted_task_is_not_reminded_again(server):
 def test_changing_due_time_schedules_a_new_reminder(server):
     """改了时间 → 新的一次提醒 (旧状态不能把新提醒吞掉)。"""
     _serve, _httpd, client, _tmp = server
-    today = datetime.now(TZ).date().isoformat()
+    due = _future_due()
     status, body = client.post('/todo/api/tasks', headers=ALICE, body={
-        'title': '改时间的任务', 'due': today, 'due_time': '00:01'})
+        'title': '改时间的任务', 'due': due.date().isoformat(),
+        'due_time': due.strftime('%H:%M'), 'owner': 'shared'})
+    assert status == 201
     task_id = body['id']
 
     provider = FakeProvider()
-    assert len(_scheduler_for_server(server, datetime.now(TZ), provider).run()['sent']) == 1
+    assert len(_scheduler_for_server(server, _remind_at(due), provider).run()['sent']) == 1
 
-    # 改到 23:30 → 现在还没到提醒时间, 不应该立刻再发
+    # 改到 3 小时后 → 新的提醒时刻还没到, 不应该立刻再发
+    moved = due + timedelta(hours=3)
     status, _body = client.put(f'/todo/api/tasks/{task_id}', headers=ALICE,
-                               body={'due_time': '23:30'})
+                               body={'due': moved.date().isoformat(),
+                                     'due_time': moved.strftime('%H:%M')})
     assert status == 200
-    now = datetime.now(TZ)
-    if now.hour < 23:
-        report = _scheduler_for_server(server, now, provider).run()
-        assert report['sent'] == []
-        assert len(provider.sent) == 1
+    report = _scheduler_for_server(server, _remind_at(due), provider).run()
+    assert report['sent'] == []
+    assert len(provider.sent) == 1
 
-        # 时间到了 → 新提醒必须发出来 (不是被旧的 "已发送" 记录压住)
-        later = datetime.combine(now.date(), datetime.strptime('23:30', '%H:%M').time(), tzinfo=TZ)
-        report = _scheduler_for_server(server, later + timedelta(minutes=1), provider).run()
-        assert len(report['sent']) == 1
-        assert len(provider.sent) == 2
+    # 新时刻到了 → 新提醒必须发出来 (不是被旧的 "已发送" 记录压住)
+    report = _scheduler_for_server(server, _remind_at(moved), provider).run()
+    assert len(report['sent']) == 1
+    assert len(provider.sent) == 2
 
 
 def test_recurring_advance_schedules_the_next_reminder(server):
     """循环任务完成推进后 → 下一期要有自己的提醒。"""
     _serve, _httpd, client, _tmp = server
-    today = datetime.now(TZ).date()
+    due = _future_due()
     status, body = client.post('/todo/api/tasks', headers=ALICE, body={
-        'title': '循环任务', 'due': today.isoformat(), 'due_time': '00:01',
+        'title': '循环任务', 'due': due.date().isoformat(),
+        'due_time': due.strftime('%H:%M'), 'owner': 'shared',
         'recurring': True, 'recurring_dates': ['5', '20']})
     assert status == 201
     task_id = body['id']
 
     provider = FakeProvider()
-    assert len(_scheduler_for_server(server, datetime.now(TZ), provider).run()['sent']) == 1
+    assert len(_scheduler_for_server(server, _remind_at(due), provider).run()['sent']) == 1
 
     # 完成 → due 推进到下一期 (规则 5/20 → 本月的 5 号或 20 号)
     status, body = client.post(f'/todo/api/tasks/{task_id}/done', headers=ALICE)
@@ -209,8 +226,8 @@ def test_recurring_advance_schedules_the_next_reminder(server):
 
     # 推进后的那一期要用新的提醒 —— 旧的 "已发送" 记录不能压住它
     next_dt = datetime.strptime(next_due, '%Y-%m-%d').replace(
-        hour=0, minute=1, tzinfo=TZ)
-    report = _scheduler_for_server(server, next_dt, provider).run()
+        hour=due.hour, minute=due.minute, tzinfo=TZ)
+    report = _scheduler_for_server(server, _remind_at(next_dt), provider).run()
     assert len(report['sent']) == 1
     assert len(provider.sent) == 2
 

@@ -1869,14 +1869,14 @@ body.modal-locked {
         <div class="form-row notify-row">
           <div class="form-group">
             <label>提前提醒（分钟）</label>
-            <input type="number" id="notifyLeadMinutes" min="0" max="1440" step="5" value="0" title="带截止时间的任务提前多少分钟提醒；0 = 到点提醒">
+            <input type="number" id="notifyLeadMinutes" min="0" max="1440" step="5" value="30" title="带截止时间的任务提前多少分钟提醒；0 = 到点提醒">
           </div>
           <div class="form-group">
             <label>摘要时间</label>
-            <input type="time" id="notifyDigestTime" value="08:00" title="每日汇总（全天任务 + 逾期任务）的发送时间">
+            <input type="time" id="notifyDigestTime" value="06:00" title="每日摘要（当天所有共享任务）的发送时间">
           </div>
         </div>
-        <div class="settings-hint">带截止时间的任务按「提前提醒」单独通知；没有时间的全天任务进入每日摘要。</div>
+        <div class="settings-hint">带时间的共享任务按「提前提醒」单独通知，也会出现在当天的每日摘要里；全天任务只进摘要。私人任务不会进入任何通知。</div>
         <button class="btn btn-primary y8y-btn y8y-btn-primary notify-save" id="notifySaveBtn" type="button">保存通知设置</button>
       </div>
       <div class="settings-group y8y-settings-group">
@@ -4025,8 +4025,8 @@ function renderNotificationSettings() {
 
   const lead = document.getElementById('notifyLeadMinutes');
   const digestTime = document.getElementById('notifyDigestTime');
-  lead.value = (notifySettings && notifySettings.lead_minutes != null) ? notifySettings.lead_minutes : 0;
-  digestTime.value = (notifySettings && notifySettings.digest_time) || '08:00';
+  lead.value = (notifySettings && notifySettings.lead_minutes != null) ? notifySettings.lead_minutes : 30;
+  digestTime.value = (notifySettings && notifySettings.digest_time) || '06:00';
 
   const row = document.getElementById('notifyChannelsRow');
   const hint = document.getElementById('notifyHint');
@@ -4079,9 +4079,9 @@ async function saveNotificationSettings() {
   const payload = {
     enabled: document.getElementById('notifyEnabledBtn').getAttribute('aria-pressed') === 'true',
     channels: channels,
-    lead_minutes: isNaN(leadRaw) ? 0 : Math.max(0, Math.min(1440, leadRaw)),
+    lead_minutes: isNaN(leadRaw) ? 30 : Math.max(0, Math.min(1440, leadRaw)),
     daily_digest: document.getElementById('notifyDigestBtn').getAttribute('aria-pressed') === 'true',
-    digest_time: document.getElementById('notifyDigestTime').value || '08:00',
+    digest_time: document.getElementById('notifyDigestTime').value || '06:00',
   };
   try {
     const res = await fetch('/todo/api/notification-settings', {

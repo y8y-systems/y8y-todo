@@ -15,7 +15,7 @@ writes two side-car files inside the data directory:
     No secrets — secrets live in the server's environment only.
 
 ``<data_dir>/notify/notification_state.json``
-    delivery bookkeeping (what was already sent, retry counters).
+    delivery bookkeeping (what was already sent, and how each attempt ended).
 
 ``<data_dir>/notify/notification_channels.json``
     the credential-free capability table the web app renders.
@@ -37,13 +37,15 @@ Safety rules baked into this module:
    the operator must enable the subsystem (``Y8Y_NOTIFY_ENABLED``).
 2. **A missing/未配置 channel is never an error.** Providers that have no
    credentials or no target for a user are simply skipped.
-3. **Private tasks never leak.** A notification is only ever built from
-   tasks the recipient can already see in the UI (own tasks + shared
-   tasks), using exactly the same rule as the web app
-   (``taskstore.can_access``).
-4. **No duplicate sends.** Every (user, task, occurrence, channel) tuple
-   is recorded in the state file; failures are retried with backoff and a
-   bounded number of attempts.
+3. **Notification scope ≠ visibility scope.** The web app shows a user
+   their own tasks *and* the shared ones (``taskstore.can_access``), but
+   the notification engine only ever considers **shared** tasks
+   (``owner: shared``) — see ``Y8Y_NOTIFY_TASK_SCOPE``. Nobody's private
+   task is ever announced, not even to its owner.
+4. **At-most-once.** Every (user, task, occurrence, channel) tuple is
+   recorded in the state file, and a recorded outcome — sent, failed or
+   missed — is final: nothing is ever retried, and a moment whose window
+   has passed is dropped instead of fired late.
 """
 import json
 import os
@@ -64,7 +66,11 @@ from taskstore import (
 )
 
 __all__ = [
-    'DEFAULT_SETTINGS',
+    'DEFAULT_DIGEST_TIME',
+    'DEFAULT_LEAD_MINUTES',
+    'DEFAULT_WINDOW_MINUTES',
+    'TASK_SCOPES',
+    'TERMINAL_STATUSES',
     'Capabilities',
     'EmailProvider',
     'LineProvider',
@@ -107,16 +113,32 @@ NOTIFY_DIR_NAME = 'notify'
 LINE_CHUNK_SIZE = 4000
 LINE_MAX_CHUNKS = 5
 
-#: 每日摘要默认发送时间
-DEFAULT_DIGEST_TIME = '08:00'
+#: 每日摘要默认发送时间 (本地时区, 默认 Asia/Tokyo)
+DEFAULT_DIGEST_TIME = '06:00'
+
+#: 事件提醒默认提前量 (分钟)
+DEFAULT_LEAD_MINUTES = 30
+
+#: 触发窗口 (分钟) —— 目标时刻之后允许的宽限。
+#:
+#: 只用来吸收**正常调度延迟** (systemd timer 的轮询周期 + 一点抖动),
+#: 不是一个补发窗口: 超出它就当错过, 永远不补发。
+DEFAULT_WINDOW_MINUTES = 10
+
+#: 通知任务范围:
+#:   shared        —— 只通知共享任务 (默认; 私人任务永远不进通知)
+#:   own_and_shared —— V1 行为: 本人的 + 共享的
+TASK_SCOPES = ('shared', 'own_and_shared')
+
+#: 终态: 这些状态下**不再**投递 (at-most-once 语义)。
+#:
+#: ``failed`` / ``exhausted`` 是"试过了, 没成功" —— 不重试;
+#: ``missed``   是"窗口已过, 根本没试" —— 不补发;
+#: ``sent``     是"发出去了" —— 不重复发。
+TERMINAL_STATUSES = ('sent', 'failed', 'exhausted', 'missed')
 
 #: 提前提醒时间的合法范围 (分钟)
 MAX_LEAD_MINUTES = 1440
-
-#: 重试退避 (分钟): base * 2^(attempts-1), 上限 cap
-RETRY_BASE_MINUTES = 5
-RETRY_CAP_MINUTES = 60
-MAX_ATTEMPTS = 5
 
 _TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
 
@@ -221,8 +243,25 @@ class NotifyConfig(Config):
         self.email_from = env.get('Y8Y_NOTIFY_EMAIL_FROM', '').strip()
         self.email_targets = _parse_targets(env.get('Y8Y_NOTIFY_EMAIL_TARGETS', ''))
 
-        # 补发窗口: 任务截止后多久之内仍可补发 (调度器停机后的兜底)
-        self.catchup_hours = max(0, _int(env.get('Y8Y_NOTIFY_CATCHUP_HOURS', '24'), 24))
+        # 通知任务范围 (默认 shared = 只通知共享任务)。
+        # 注意: 这与 Web 端的**可见范围**不是一回事 —— 可见范围是
+        # "本人 + 共享" (taskstore.can_access), 通知范围只取共享任务。
+        self.task_scope = (env.get('Y8Y_NOTIFY_TASK_SCOPE', 'shared').strip().lower()
+                           or 'shared')
+        if self.task_scope not in TASK_SCOPES:
+            self.task_scope = 'shared'
+
+        # 收件人白名单 (逗号分隔的用户 id); 空 = 不额外限制 (谁开了通知、
+        # 谁有投递目标, 谁就收)。灰度时用它把发送范围钉死在一个用户上。
+        self.recipients = [u.strip()
+                           for u in env.get('Y8Y_NOTIFY_RECIPIENTS', '').split(',')
+                           if u.strip()]
+
+        # 触发窗口 (分钟): 目标时刻之后的宽限, 只覆盖正常调度延迟。
+        self.window_minutes = max(
+            0, _int(env.get('Y8Y_NOTIFY_WINDOW_MINUTES', str(DEFAULT_WINDOW_MINUTES)),
+                    DEFAULT_WINDOW_MINUTES))
+
         # HTTP 超时 (秒)
         self.timeout = max(1.0, _float(env.get('Y8Y_NOTIFY_TIMEOUT', '15'), 15.0))
         # 状态文件保留天数 (超过则清理历史投递记录)
@@ -238,7 +277,9 @@ class NotifyConfig(Config):
         if self.email_api_key and self.email_from:
             channels.append('email')
         return (f'notify={"on" if self.notify_enabled else "off"} '
-                f'channels={channels} catchup={self.catchup_hours}h')
+                f'channels={channels} scope={self.task_scope} '
+                f'window={self.window_minutes}m '
+                f'recipients={",".join(self.recipients) if self.recipients else "any"}')
 
     def secrets(self):
         """本配置里的所有敏感值 —— 供日志/状态文件脱敏使用。
@@ -265,11 +306,15 @@ def _float(raw, default):
 
 # ── 用户设置 ──────────────────────────────────────────────────────────
 def default_settings():
-    """通知默认关闭 —— 没有任何配置时 Todo 的行为与今天完全一致。"""
+    """通知默认关闭 —— 没有任何配置时 Todo 的行为与今天完全一致。
+
+    默认值即业务口径: 每天 06:00 (本地时区) 一条摘要, 事件提前 30 分钟
+    提醒一次。用户在「设置 → 通知」里改了就以用户的为准。
+    """
     return {
         'enabled': False,
         'channels': [],
-        'lead_minutes': 0,
+        'lead_minutes': DEFAULT_LEAD_MINUTES,
         'daily_digest': False,
         'digest_time': DEFAULT_DIGEST_TIME,
     }
@@ -375,7 +420,7 @@ class SettingsStore:
 
 # ── 投递状态 ──────────────────────────────────────────────────────────
 class StateStore:
-    """投递状态: 防止重复发送 + 支撑安全重试。
+    """投递状态: 防止重复发送 (at-most-once)。
 
     ``reminders`` 的键是 *occurrence key*:
 
@@ -383,9 +428,13 @@ class StateStore:
 
     键里带 due/due_time 是刻意的 —— 任务改了截止时间就等于换了一次
     "提醒事件", 旧事件的状态自然失效, 新事件重新计一次, 既不会漏提醒
-    也不会因为改了时间而被旧的 "已发送" 记录吞掉。
+    也不会因为改了时间而被旧的 "已发送" 记录吞掉。循环任务推进到下一
+    期时 due 变了, 同样自然获得一次新的提醒机会。
 
     ``digests`` 的键是: user | date | channel (每天每渠道最多一次)。
+
+    每条记录里的 ``status`` 是**终态**: sent / failed / exhausted /
+    missed。调度器看到终态就不再动它 —— 失败不重试, 错过不补发。
     """
 
     def __init__(self, path):
@@ -520,8 +569,9 @@ def _parse_iso(value):
 class ProviderError(Exception):
     """投递失败。
 
-    ``retryable=False`` 表示重试也没用 (凭据无效、请求格式错), 调度器会
-    直接放弃而不是反复打接口。
+    ``retryable`` 只描述错误的**性质** (凭据无效、请求格式错这类错误
+    重试也没用), 记录在投递状态里方便排查。调度器本身**不重试**:
+    一次投递只有一次机会 (at-most-once), 见 ``TERMINAL_STATUSES``。
     """
 
     def __init__(self, message, retryable=True):
@@ -926,10 +976,13 @@ class Scheduler:
         report = {
             'now': now.isoformat(),
             'dry_run': bool(dry_run),
+            'scope': self.config.task_scope,
+            'window_minutes': self.config.window_minutes,
             'sent': [],
             'failed': [],
             'skipped': [],
             'planned': [],
+            'missed_reminders': 0,
         }
 
         if not self.config.notify_enabled:
@@ -938,6 +991,13 @@ class Scheduler:
             return report
 
         users = self.settings_store.enabled_users()
+        allow = set(self.config.recipients)
+        if allow:
+            blocked = [u for u in users if u not in allow]
+            users = [u for u in users if u in allow]
+            for user in blocked:
+                report['skipped'].append(
+                    {'user': user, 'reason': 'not in Y8Y_NOTIFY_RECIPIENTS allowlist'})
         if not users:
             report['skipped'].append({'reason': 'no user has enabled notifications'})
             return report
@@ -962,13 +1022,15 @@ class Scheduler:
                 report['skipped'].append({'user': user, 'reason': 'no channel configured on the server'})
                 continue
 
-            reminders, digest_today, digest_overdue = self._collect(user, settings, tasks)
-            live_keys.update(key for key, _task, _msg in reminders)
+            plan = self._collect(user, settings, tasks)
+            live_keys.update(key for key, _task, _msg in plan['reminders'])
 
-            for key, task, message in reminders:
+            for key, task, message in plan['reminders']:
                 self._deliver(user, key, task, message, usable, report, dry_run)
 
-            self._maybe_digest(user, settings, digest_today, digest_overdue, usable,
+            report['missed_reminders'] += plan['missed']
+
+            self._maybe_digest(user, settings, plan['digest_items'], usable,
                                report, dry_run)
 
         if not dry_run:
@@ -978,45 +1040,72 @@ class Scheduler:
         return report
 
     # ── 收集待发内容 ──
+    def _in_scope(self, user, task):
+        """这个任务进不进通知范围?
+
+        通知范围 **不等于** 可见范围: Web 端给用户看"本人 + 共享"
+        (``taskstore.can_access``), 而通知只取**共享**任务 —— 任何人的
+        私人任务都不会出现在任何人的通知里。
+
+        ``Y8Y_NOTIFY_TASK_SCOPE=own_and_shared`` 可以退回 V1 行为
+        (本人 + 共享), 默认是 ``shared``。
+        """
+        if self.config.task_scope == 'own_and_shared':
+            return can_access(task.owner, user)
+        return task.owner == 'shared'
+
     def _collect(self, user, settings, tasks):
-        """→ (reminders, digest_today, digest_overdue)"""
+        """算出这一刻该发什么 → {'reminders', 'digest_items', 'missed'}
+
+        规则:
+
+        * 只看共享任务 (scope 见 ``_in_scope``);
+        * 只看未完成、有有效截止日期的任务;
+        * **逾期**任务 (截止日期早于今天) 一律不进摘要, 也不补发提醒;
+        * 当天 (含带时间的与全天的) 全部进当天的摘要;
+        * 带时间的任务额外产生一次单点提醒, 目标时刻 = 截止时间 − 提前量;
+        * 单点提醒只在 [目标时刻, 目标时刻 + 窗口] 内发 —— 超出即错过,
+          **不补发**;
+        * 摘要与单点提醒互不影响: 早上出现在摘要里的事件, 到点照样提醒。
+        """
         now = self.now or datetime.now(self.tz)
         today = now.date()
-        lead = timedelta(minutes=int(settings.get('lead_minutes', 0)))
-        catchup = timedelta(hours=self.config.catchup_hours)
+        lead = timedelta(minutes=int(settings.get('lead_minutes', DEFAULT_LEAD_MINUTES)))
+        window = timedelta(minutes=self.config.window_minutes)
 
         reminders = []
-        digest_today = []
-        digest_overdue = []
+        digest_items = []
+        missed = 0
 
         for task in tasks:
-            # 可见性: 与 Web 端完全一致的规则 —— 自己的 + 共享的。
-            # 别人的私人任务永远不会出现在任何人的通知里。
-            if not can_access(task.owner, user):
+            if not self._in_scope(user, task):
                 continue
             if task.due_date is None:
                 continue
+            if task.due_date < today:
+                continue                    # 逾期: 不进摘要, 不补发
 
-            if task.has_time:
-                due_at = datetime.combine(
-                    task.due_date,
-                    datetime.strptime(task.due_time, '%H:%M').time(),
-                    tzinfo=self.tz)
-                remind_at = due_at - lead
-                if now < remind_at:
-                    continue                      # 还没到提醒时间
-                if now > due_at + catchup:
-                    continue                      # 过期太久了, 不补发
-                message = self._reminder_message(user, task, due_at, lead)
-                reminders.append((task.occurrence_key(user), task, message))
-            else:
-                # 全天任务 → 走每日摘要
-                if task.due_date == today:
-                    digest_today.append(task)
-                elif task.due_date < today:
-                    digest_overdue.append(task)
+            if task.due_date == today:
+                digest_items.append(task)   # 当天的任务都进当天的摘要
 
-        return reminders, digest_today, digest_overdue
+            if not task.has_time:
+                continue                    # 全天任务没有单点提醒
+
+            due_at = datetime.combine(
+                task.due_date,
+                datetime.strptime(task.due_time, '%H:%M').time(),
+                tzinfo=self.tz)
+            remind_at = due_at - lead
+            if now < remind_at:
+                continue                    # 还没到提醒时刻
+            if now > remind_at + window:
+                missed += 1                 # 窗口已过 → 错过, 不补发
+                continue
+            message = self._reminder_message(user, task, due_at, lead)
+            reminders.append((task.occurrence_key(user), task, message))
+
+        digest_items.sort(key=lambda t: (t.due_time == '', t.due_time, t.title))
+        return {'reminders': reminders, 'digest_items': digest_items, 'missed': missed}
 
     def _reminder_message(self, user, task, due_at, lead):
         lines = [f'【y8y Todo 提醒】{task.title}']
@@ -1032,20 +1121,30 @@ class Scheduler:
         return Message('reminder', f'提醒：{task.title}', '\n'.join(lines),
                        link=self._link(), task_id=task.id)
 
-    def _digest_message(self, user, today_items, overdue_items):
+    def _digest_message(self, user, items):
+        """当天的摘要 —— 带时间的与全天的分开两节, 按时间排序。
+
+        **不含逾期任务**: 摘要只讲"今天要做的事", 昨天没做完的不会
+        在第二天早上再来一遍。
+        """
         today = (self.now or datetime.now(self.tz)).date().isoformat()
+        timed = sorted((t for t in items if t.has_time),
+                       key=lambda t: (t.due_time, t.title))
+        allday = [t for t in items if not t.has_time]
+
         lines = [f'【y8y Todo 每日摘要】{today}']
-        if today_items:
-            lines.append(f'今日全天任务（{len(today_items)}）')
-            for task in today_items:
-                lines.append(f'· {task.title}' + (f'（{task.project}）' if task.project else ''))
-        if overdue_items:
-            lines.append(f'逾期任务（{len(overdue_items)}）')
-            for task in overdue_items:
-                when = f'{task.due} {task.due_time}' if task.has_time else task.due
-                lines.append(f'· {task.title}（截止 {when}）')
+        if timed:
+            lines.append(f'今日安排（{len(timed)}）')
+            for task in timed:
+                suffix = f'（{task.project}）' if task.project else ''
+                lines.append(f'· {task.due_time} {task.title}{suffix}')
+        if allday:
+            lines.append(f'全天任务（{len(allday)}）')
+            for task in allday:
+                suffix = f'（{task.project}）' if task.project else ''
+                lines.append(f'· {task.title}{suffix}')
         lines.append(self._link_line())
-        subject = f'{today} 每日摘要（{len(today_items)} 全天 / {len(overdue_items)} 逾期）'
+        subject = f'{today} 每日摘要（{len(timed)} 项安排 / {len(allday)} 全天）'
         return Message('digest', subject, '\n'.join(lines), link=self._link())
 
     def _link(self):
@@ -1078,12 +1177,8 @@ class Scheduler:
         }
         for channel in channels:
             state = self.state_store.channel_state(key, channel)
-            if state and state.get('status') in ('sent', 'exhausted'):
-                continue
-            if state and state.get('next_attempt_at'):
-                nxt = _parse_iso(state.get('next_attempt_at'))
-                if nxt and (self.now or datetime.now(self.tz)) < nxt:
-                    continue                       # 退避中, 下一轮再试
+            if state and state.get('status') in TERMINAL_STATUSES:
+                continue                    # 已有终态 → 不重发 (at-most-once)
             if dry_run:
                 report['planned'].append({'user': user, 'channel': channel,
                                           'task': task.title, 'kind': message.kind})
@@ -1091,19 +1186,15 @@ class Scheduler:
             try:
                 self.providers[channel].send(user, message)
             except ProviderError as e:
+                # at-most-once: **不重试**。一次投递只有一次机会 ——
+                # 失败就记成终态, 下一轮不再重发 (偶发网络故障会丢消息,
+                # 这是明确接受的取舍: 宁可少一条, 也不要重复轰炸)。
                 attempts = int((state or {}).get('attempts', 0)) + 1
                 retryable = bool(getattr(e, 'retryable', True))
-                if retryable and attempts < MAX_ATTEMPTS:
-                    status = 'failed'
-                    delay = min(RETRY_BASE_MINUTES * (2 ** (attempts - 1)), RETRY_CAP_MINUTES)
-                    next_at = (self.now or datetime.now(self.tz)) + timedelta(minutes=delay)
-                    payload = {'status': status, 'at': _now_iso(self.now),
-                               'attempts': attempts, 'error': self._safe_error(e, 200),
-                               'next_attempt_at': next_at.isoformat()}
-                else:
-                    status = 'exhausted'
-                    payload = {'status': status, 'at': _now_iso(self.now),
-                               'attempts': attempts, 'error': self._safe_error(e, 200)}
+                status = 'failed' if retryable else 'exhausted'
+                payload = {'status': status, 'at': _now_iso(self.now),
+                           'attempts': attempts, 'error': self._safe_error(e, 200),
+                           'retryable': retryable}
                 self.state_store.set_channel_state(key, channel, payload, meta)
                 report['failed'].append({'user': user, 'channel': channel,
                                          'task': task.title, 'error': self._safe_error(e, 200),
@@ -1119,25 +1210,42 @@ class Scheduler:
                                        'task': task.title, 'kind': message.kind})
                 self.log.append(f'sent user={user} channel={channel} kind={message.kind}')
 
-    def _maybe_digest(self, user, settings, today_items, overdue_items, channels,
-                      report, dry_run):
+    def _maybe_digest(self, user, settings, items, channels, report, dry_run):
+        """当天的每日摘要 —— 一天最多一条, 错过不补发。"""
         if not settings.get('daily_digest'):
             return
-        if not today_items and not overdue_items:
-            return                              # 没有内容就不打扰
+        if not items:
+            return                              # 没有内容就不打扰 (不发空摘要)
         now = self.now or datetime.now(self.tz)
         hh, mm = settings.get('digest_time', DEFAULT_DIGEST_TIME).split(':')
-        digest_at = datetime.combine(now.date(), datetime.strptime(f'{hh}:{mm}', '%H:%M').time(),
+        digest_at = datetime.combine(now.date(),
+                                      datetime.strptime(f'{hh}:{mm}', '%H:%M').time(),
                                       tzinfo=self.tz)
+        window = timedelta(minutes=self.config.window_minutes)
+        day = now.date().isoformat()
+
         if now < digest_at:
             return                              # 还没到摘要时间
-        message = self._digest_message(user, today_items, overdue_items)
-        day = now.date().isoformat()
+        if now > digest_at + window:
+            # 错过了 (调度器当时不可用) —— 记一笔, **绝不补发**。
+            for channel in channels:
+                key = f'{user}|{day}|{channel}'
+                if self.state_store.digest_state(key):
+                    continue
+                self.state_store.set_digest_state(
+                    key, {'status': 'missed', 'at': _now_iso(self.now),
+                          'reason': f'window expired (target {digest_at.isoformat()})'})
+                report['skipped'].append(
+                    {'user': user, 'channel': channel, 'kind': 'digest',
+                     'reason': 'digest window expired — not sent late'})
+            return
+
+        message = self._digest_message(user, items)
         for channel in channels:
             key = f'{user}|{day}|{channel}'
             state = self.state_store.digest_state(key)
-            if state and state.get('status') in ('sent', 'exhausted'):
-                continue
+            if state and state.get('status') in TERMINAL_STATUSES:
+                continue                    # 今天已经发过 (或已错过) → 不再发
             if dry_run:
                 report['planned'].append({'user': user, 'channel': channel,
                                           'kind': 'digest', 'day': day})
@@ -1145,18 +1253,12 @@ class Scheduler:
             try:
                 self.providers[channel].send(user, message)
             except ProviderError as e:
+                # 同单点提醒: 失败即终态, 不重试, 不补发。
                 attempts = int((state or {}).get('attempts', 0)) + 1
                 retryable = bool(getattr(e, 'retryable', True))
-                if retryable and attempts < MAX_ATTEMPTS:
-                    status = 'failed'
-                    delay = min(RETRY_BASE_MINUTES * (2 ** (attempts - 1)), RETRY_CAP_MINUTES)
-                    next_at = now + timedelta(minutes=delay)
-                    payload = {'status': status, 'at': _now_iso(self.now), 'attempts': attempts,
-                               'error': self._safe_error(e, 200), 'next_attempt_at': next_at.isoformat()}
-                else:
-                    status = 'exhausted'
-                    payload = {'status': status, 'at': _now_iso(self.now),
-                               'attempts': attempts, 'error': self._safe_error(e, 200)}
+                status = 'failed' if retryable else 'exhausted'
+                payload = {'status': status, 'at': _now_iso(self.now), 'attempts': attempts,
+                           'error': self._safe_error(e, 200), 'retryable': retryable}
                 self.state_store.set_digest_state(key, payload)
                 report['failed'].append({'user': user, 'channel': channel, 'kind': 'digest',
                                          'error': self._safe_error(e, 200), 'status': status})

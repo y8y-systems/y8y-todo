@@ -512,7 +512,9 @@ users are and where the tasks live.
 | `Y8Y_NOTIFY_EMAIL_API_KEY` | *(empty)* | Resend API key |
 | `Y8Y_NOTIFY_EMAIL_FROM` | *(empty)* | sender address (a domain you verified with Resend) |
 | `Y8Y_NOTIFY_EMAIL_TARGETS` | *(empty)* | `user=mail@example.com,...`; empty = use the address from `Y8Y_USERS` |
-| `Y8Y_NOTIFY_CATCHUP_HOURS` | `24` | how long after the due time a missed reminder may still be sent |
+| `Y8Y_NOTIFY_TASK_SCOPE` | `shared` | which tasks may be announced: `shared` (shared tasks only) or `own_and_shared` (own + shared) |
+| `Y8Y_NOTIFY_RECIPIENTS` | *(empty)* | `user,...` allow-list of recipients; empty = everyone who enabled notifications and has a target |
+| `Y8Y_NOTIFY_WINDOW_MINUTES` | `10` | grace window after the target moment; beyond it the notification is **missed, not sent late** |
 | `Y8Y_NOTIFY_RETENTION_DAYS` | `30` | how long delivery state is kept before it is pruned |
 | `Y8Y_NOTIFY_TIMEOUT` | `15` | per-request timeout in seconds |
 
@@ -524,6 +526,47 @@ up; each user still has to enable notifications for themselves in
 **Settings → Notifications** and pick at least one channel. If a
 channel has no credentials, it is simply skipped — it never makes the
 Todo app error out.
+
+#### Rolling out the shared-task policy (LINE, canary user)
+
+The shipped defaults announce **shared tasks only**, digest them once a
+day at **06:00** (Asia/Tokyo), and remind **30 minutes** before a task
+that has a clock time. Delivery is at-most-once: nothing is back-filled
+and nothing is retried.
+
+To canary this on a single user, set in
+`/etc/y8y-todo/y8y-todo-notify.env`:
+
+```bash
+Y8Y_NOTIFY_ENABLED=1
+Y8Y_NOTIFY_TASK_SCOPE=shared          # shared tasks only (default)
+Y8Y_NOTIFY_RECIPIENTS=kara            # pin the canary: nobody else receives
+Y8Y_NOTIFY_WINDOW_MINUTES=10          # grace window after the target moment
+Y8Y_NOTIFY_LINE_TOKEN=<token>         # from the LINE Messaging API console
+Y8Y_NOTIFY_LINE_TARGETS=kara=<LINE-user-id>
+# Email stays off: leave Y8Y_NOTIFY_EMAIL_API_KEY / _EMAIL_TARGETS empty.
+```
+
+> ⚠️ `Y8Y_NOTIFY_CATCHUP_HOURS` was **removed** — the catch-up window
+> contradicted the "never send late" rule. Delete the line from the env
+> file; leaving it does nothing, but keeping it hides the change from
+> the next reader.
+
+The recipient's own preferences still apply (double opt-in): in
+**Settings → Notifications** that user has to turn notifications on,
+pick the **LINE** channel, and turn the **daily digest** on. Their lead
+time and digest time default to 30 minutes / 06:00.
+
+**Keep the timer disabled until the Operator has accepted the change:**
+
+```bash
+sudo systemctl is-enabled y8y-todo-notify.timer   # → disabled
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
+```
+
+Only after the dry-run shows exactly the expected recipients, titles
+and timings should the Operator enable the timer by hand.
 
 #### Verify before enabling
 
@@ -566,15 +609,19 @@ the API key with `***`.
 - The timer runs every 5 minutes, so a reminder is delivered at most
   ~5 minutes late. Set `AccuracySec=1min` (already in the packaged
   timer) and systemd aligns the wake-up to whole minutes.
-- `Persistent=true` makes systemd run the missed tick once after a
-  reboot.
-- The scheduler never crashes on a provider error: a failed delivery is
-  recorded, retried with backoff (`5 · 2ⁿ` minutes, max 60, 5 attempts)
-  and finally marked as exhausted. Permanent 4xx errors (other than
-  408/425/429) are not retried.
-- A reminder whose due time is more than `Y8Y_NOTIFY_CATCHUP_HOURS` in
-  the past is dropped rather than delivered late — after a long outage
-  you get the daily digest, not a burst of stale reminders.
+- `Persistent=false` (the shipped timer) means a reboot does **not**
+  run the missed tick. Nothing is ever back-filled: a reminder whose
+  window has passed is dropped, and a digest missed at 06:00 is not
+  re-sent later that day.
+- The scheduler never crashes on a provider error, and it never retries:
+  a failed delivery is recorded as a final outcome (`failed` /
+  `exhausted`, with the attempt count and the redacted error) and is
+  never attempted again. A transient network fault therefore loses that
+  one message — the accepted trade-off for never double-sending.
+- A reminder is only sent inside its window — from the target moment
+  (`due_time` minus the lead time) up to `Y8Y_NOTIFY_WINDOW_MINUTES`
+  later (default 10). Beyond the window it is dropped, not delivered
+  late; the runner reports it as `missed`.
 - Delivery state is keyed by *occurrence* (user, owner, file, created
   stamp, due date/time), so rescheduling a task produces a fresh
   reminder while an unchanged task is never sent twice.
