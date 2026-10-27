@@ -457,7 +457,25 @@ that file to render the settings panel.
 `y8y-todo.service` does **not** include `y8y-todo-notify.env` in its
 `EnvironmentFile=` list — only `y8y-todo-notify.service` does.
 
+The scheduler also runs under its **own system account** (`y8y-notify`),
+not under the web account (`y8y`). That is what actually stops a
+compromised web process from reading the LINE token or the email API key
+out of the scheduler's process — see §5.2 for the full model, the
+measurement behind it, and the rollback.
+
 #### Install
+
+First create the scheduler's account and the shared state directory
+(details and rollback in §5.2.6):
+
+```bash
+sudo useradd --system --user-group --no-create-home \
+        --shell /usr/sbin/nologin y8y-notify
+sudo usermod --append --groups y8y-notify y8y
+sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+```
+
+Then install the units:
 
 ```bash
 sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.service \
@@ -556,47 +574,56 @@ the API key with `***`.
 - Delivery state is keyed by *occurrence* (user, owner, file, created
   stamp, due date/time), so rescheduling a task produces a fresh
   reminder while an unchanged task is never sent twice.
-- `notification_state.json` should be part of your backup: without it a
-  restored deployment would re-send reminders that already went out.
+- `notify/notification_state.json` should be part of your backup: without
+  it a restored deployment would re-send reminders that already went out.
+  The whole data directory is what you back up, so it is included
+  (§7).
 
 ### 5.2 Credential isolation (process permissions)
 
 #### 5.2.1 The question
 
-`y8y-todo.service` and `y8y-todo-notify.service` run as the **same**
-system user (`y8y`). The web process holds no credentials of its own —
-but it shares a UID with the process that does.
+> **If the web process is compromised, can it read the LINE token and the
+> Resend API key out of the scheduler's process?**
 
-> **If the web process is compromised, can it read the LINE token and
-> the Resend API key out of the scheduler's process?**
->
-> **Yes. In the default configuration it can, directly and trivially.**
-> This is a real, exploitable weakness — not a theoretical one — and
-> §5.2.7 describes the two-stage fix.
+With the configuration this release ships, **no** — and the reason is
+kernel-enforced, not a configuration convention: the two services run
+under **different system accounts**, so the kernel refuses the read
+before any permission bit or unit option is even consulted.
 
-#### 5.2.2 What the current setup already gets right
+#### 5.2.2 The shipped configuration
 
-These protections exist and are worth keeping:
+| | web service | notification scheduler |
+| --- | --- | --- |
+| unit | `y8y-todo.service` | `y8y-todo-notify.service` (+ `.timer`) |
+| user | `y8y` | `y8y-notify` |
+| credential file | **not referenced** | `/etc/y8y-todo/y8y-todo-notify.env` (root:root 600) |
+| writable path | `/var/lib/y8y-todo` | `/var/lib/y8y-todo/notify` **only** |
+| reads | tasks, lists, preferences | tasks (read-only), preferences |
 
-- `y8y-todo.service` does **not** list `y8y-todo-notify.env` in its
-  `EnvironmentFile=` — the web process's own environment contains no
-  credential values.
-- The env file is `root:root 0600`. systemd (PID 1) reads it as root
-  and injects the values into the scheduler's environment.
-- The web app never imports the notification config module and never
-  opens a credential file.
-- The scheduler publishes only a **credential-free capability table**
-  (`notification_channels.json`).
-- Credentials never appear in a command line (systemd's
-  `EnvironmentFile=`, never a shell that expands the file into an
-  argument list) and never appear in the journal (errors are
-  redacted).
+Both accounts are members of the group `y8y-notify`, which owns the
+notification state directory `/var/lib/y8y-todo/notify`. That directory
+is the **only** place both accounts may write — see §5.2.4 for why it
+has to be a directory and not a set of files.
 
-All of that stops the web service from *reading the credentials
-directly*. None of it stops the web service from *inspecting another
-process*.
+Five things hold the boundary up:
 
-#### 5.2.3 The actual exposure: same UID ⇒ `/proc/<pid>/environ` is readable
+1. `y8y-todo.service` does **not** list `y8y-todo-notify.env` in its
+   `EnvironmentFile=` — the web process's own environment contains no
+   credential values at all.
+2. The credential file is `root:root 0600`. systemd (PID 1) reads it as
+   root and injects the values into the scheduler's environment.
+3. The two units run as **different users** → the kernel denies the
+   cross-process environment read (§5.2.3).
+4. The scheduler publishes only a **credential-free capability table**
+   (`notification_channels.json`); the web app renders the settings
+   panel from it.
+5. Credentials never appear in a command line (systemd's
+   `EnvironmentFile=`, never a shell that expands the file into an
+   argument list) and never appear in the journal (errors are
+   redacted).
+
+#### 5.2.3 Why a separate system user
 
 Whether one user may read another process's environment is decided by
 `ptrace_may_access()` (`kernel/ptrace.c`) — and for the "same user"
@@ -604,37 +631,31 @@ case it waves the request through:
 
 ```c
 if (uid_eq(caller_uid, tcred->euid) && uid_eq(caller_uid, tcred->suid) &&
-    uid_eq(caller_uid, tcred->uid)  && gid_eq(caller_gid, tcred->egid) …
+    uid_eq(caller_uid, tcred->uid)  && gid_eq(caller_gid, tcred->egid) …)
         goto ok;                       /* same UID → allowed */
 if (ptrace_has_cap(tcred->user_ns, mode))
         goto ok;                       /* different UID → needs CAP_SYS_PTRACE */
 return -EPERM;
 ```
 
-Measured on the target platform (Ubuntu 22.04, kernel 5.15):
+With **different** UIDs the comparison fails and the call returns
+`-EPERM` — before any LSM hook is consulted. Measured on the target
+platform (Ubuntu 22.04, kernel 5.15):
 
 | attempt | result |
 | --- | --- |
 | same-UID read of `/proc/<pid>/environ` | **succeeds** — the token is in cleartext |
 | same-UID `ptrace(PTRACE_ATTACH)` | `EPERM` |
 | `kernel.yama.ptrace_scope` | `1` |
+| cross-UID read of `/proc/<pid>/environ` | **denied** (`EACCES`) |
 
-The Yama setting is what makes this *look* protected, but it is not:
-`yama_ptrace_access_check()` (`security/yama/yama_lsm.c`) only
+The Yama setting is what makes a same-UID setup *look* protected, but it
+is not: `yama_ptrace_access_check()` (`security/yama/yama_lsm.c`) only
 intercepts requests carrying `PTRACE_MODE_ATTACH`. Reading
 `/proc/<pid>/environ` uses the READ mode, which Yama does not touch.
-`/proc` is also mounted without `hidepid=`, so the scheduler's entry is
-visible in the first place.
+`/proc` is also mounted without `hidepid=`.
 
-**Consequence.** A compromised web process can walk `/proc`, find the
-scheduler by its `cmdline`, and read its environment — the LINE channel
-token and the Resend API key, in cleartext, with no privilege required.
-The scheduler is started every 5 minutes by a timer and exits, but the
-web process is long-lived, so in practice the window is essentially
-always open. This is the definition of an isolation boundary that does
-not isolate.
-
-#### 5.2.4 What does *not* protect you
+What does **not** protect you:
 
 | mechanism | what it really does | helps against the environ read? |
 | --- | --- | --- |
@@ -643,93 +664,98 @@ not isolate.
 | `NoNewPrivileges=yes` | forbids gaining privileges via setuid binaries | **no** — reading needs no privilege at all |
 | `PrivateTmp=yes` | a private `/tmp` | **no** |
 | `kernel.yama.ptrace_scope=1` | blocks `ptrace` attach | **no** — READ mode (environ) is not intercepted |
-| `ProtectProc=invisible` / `ptraceable` | hides other users' processes | **no** — `hidepid=2`/`hidepid=4` still show same-UID processes, and the reader is same-UID here |
-| `LoadCredential=` (see §5.2.5 C) | puts the credential in `/run/credentials/<unit>/` | **no** — that directory is `0700` owned by the *service user*, so a same-UID process reads it directly |
+| `ProtectProc=invisible` / `ptraceable` | hides other users' processes | **no** — `hidepid=2`/`hidepid=4` still show same-UID processes |
+| `LoadCredential=` | puts the credential in `/run/credentials/<unit>/` | **no** — that directory is `0700` owned by the *service user*; with a shared UID the web process reads it directly |
 
 One more dead end worth recording: **systemd has no `Dumpable=` unit
 option.** Neither v249 (the Ubuntu 22.04 version) nor current systemd
-exposes a way to say "start this service with
-`PR_SET_DUMPABLE=0`" — checked in `src/core/execute.c`,
-`exec-invoke.c`, `service.c` and the `systemd.exec` manual. The unit
-file therefore cannot express the in-process hardening described in
-§5.2.6; it has to be done by the program itself.
+exposes a way to say "start this service with `PR_SET_DUMPABLE=0`" —
+checked in `src/core/execute.c`, `exec-invoke.c`, `service.c` and the
+`systemd.exec` manual. The in-process hardening of §5.2.5 therefore has
+to be done by the program itself.
 
-#### 5.2.5 Options A / B / C
+#### 5.2.4 The permission model — and the contradiction this release fixes
 
-**A — keep one user, harden the process**
+**The problem with a file-level ACL.** The three notification JSON
+files are written with `atomic_write()`, which is *create a temporary
+file, then rename it over the target*. Both steps need **write +
+execute on the containing directory**:
 
-Only viable form is in-process `prctl(PR_SET_DUMPABLE, 0)` (systemd
-cannot express it, §5.2.4). It genuinely closes the vector: the
-kernel's `get_dumpable()` check in `ptrace_may_access()` fails, so
-`/proc/<pid>/environ` returns `EACCES`, `/proc/<pid>/mem` is refused,
-`ptrace` attach is refused and no core dump is written.
+- creating the temporary file needs write+execute on the directory;
+- `rename(2)` — which `os.replace()` uses — needs write+execute on the
+  directory too. The permissions of the *target file* are irrelevant
+  for the rename.
 
-- ✔ Zero deployment change, no new user, no file-ownership migration.
-- ✔ Backward compatible, stdlib-only.
-- ✘ **Residual window:** `execve()` resets the dumpable flag to 1, so
-  between the Python interpreter starting and the process calling
-  `prctl()` (tens of milliseconds) the environment is still readable.
-- ✘ No core dumps and no `gdb` attach for post-mortem debugging.
+So "give the scheduler write access to these three files" is not a
+sufficient recipe: with the directory only `r-x`, the scheduler cannot
+create its temporary file; and granting the directory `rwx` to let it
+create one also lets it replace **anything else in that directory** —
+including `internal_tokens.json`, the machine-to-machine credential map
+(`docs/deployment.md` §4).
 
-**B — give the scheduler its own system user (`y8y-notify`)**
+**The resolution: one dedicated directory.** All three notification
+files live in `/var/lib/y8y-todo/notify`, owned by the scheduler, with
+the shared group and the setgid bit set:
 
-Different UID ⇒ `ptrace_may_access()` no longer takes the "same
-user" shortcut and returns `-EPERM` at the UID comparison — before any
-LSM hook is consulted. This is a *kernel-enforced* boundary rather
-than a mitigation, and it also closes the residual window from option
-A.
+```bash
+sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+```
 
-- ✔ Blocks the environ read at the source, with no privileges involved.
-- ✔ Closes A's start-up window too.
-- ✔ Composes with `LoadCredential=` (see C).
-- ✘ Requires a new system user, a shared group or ACLs on the data
-  directory, and a change of ownership for the three notification
-  JSON files.
-- ✘ The scheduler must be able to read every user's task files (it
-  computes digests for all users) — so `y8y-notify` becomes a
-  second principal that may read private task content. That is not a
-  *widening* (today the same `y8y` UID reads everything too), but the
-  notify account must be treated as trusted.
-
-**C — systemd credentials (`LoadCredential=`)**
-
-`LoadCredential=` exists since systemd v247, so Ubuntu 22.04 /
-systemd 249 supports it. But it is a **file-delivery mechanism, not a
-security boundary**: `/run/credentials/<unit>/` is `0700` owned by the
-unit's own user, so with a shared UID the web process reads the
-credential file directly. On its own it changes nothing about the
-attack surface; it only becomes meaningful once option B is in place.
-
-| | A — in-process hardening | B — separate user | C — `LoadCredential=` |
+| file | written by | read by | how |
 | --- | --- | --- | --- |
-| Blocks the environ read | yes, after the start-up window | yes, kernel-enforced | no (on its own) |
-| Blocks the start-up window | no | yes | no |
-| Needs new system user | no | yes | no |
-| Needs ownership/ACL migration | no | yes | no |
-| Blocks `ptrace` attach | yes | yes | no |
-| Needs core dump / gdb | no (escape hatch exists) | yes | unchanged |
-| Stdlib-only, no new service | yes | yes | yes |
-| Verdict | **ship now** | **recommended, staged** | only together with B |
+| `notification_settings.json` | web (`y8y`) | scheduler | group `y8y-notify` |
+| `notification_state.json` | scheduler | backup / operator | group `y8y-notify` |
+| `notification_channels.json` | scheduler | web (`y8y`) | group `y8y-notify` |
 
-**Recommendation — layered, in this order.**
+Why each piece is there:
 
-1. **Ship A now.** It is a few lines of stdlib-only code, needs no
-   deployment change, breaks nothing, and closes the real vector.
-2. **Do B as a documented, manual follow-up** (§5.2.7). It is the
-   only thing that also removes A's residual window, and it is the
-   only complete answer to "the web service must never be able to
-   obtain the credentials".
-3. **Add C only if B is adopted.** Doing C alone would create the
-   *appearance* of a hardened deployment without any actual
-   protection — exactly the kind of configuration this project avoids.
+- **group `y8y-notify` (2770)** — both accounts are members, so both
+  may create and rename files in the directory, and neither may touch
+  anything outside it. "Other" has no access at all.
+- **setgid (the `2`)** — every file created in the directory inherits
+  the group, so the file one account writes stays readable by the
+  other even after `os.replace()` swaps in a fresh inode. Without it
+  the group would revert to the writer's primary group on every write.
+- **umask 0022** (both units) — files land as `0644`, i.e. readable by
+  the other account, and **not** writable by it: only the scheduler may
+  rewrite its own delivery state.
+- **`ReadWritePaths=-/var/lib/y8y-todo/notify`** in the notify unit —
+  a systemd-level allowlist on top of the Unix permissions. The data
+  directory root is read-only for the scheduler, so even a compromised
+  scheduler cannot replace `internal_tokens.json`.
 
-#### 5.2.6 What this release already ships (option A)
+The data directory root itself stays owned by `y8y` and world-readable
+for the task files; the scheduler only ever *reads* tasks (it computes
+digests for every user) and writes inside its own state directory.
 
-`src/procguard.py` performs the hardening, and `notify_runner.py`
+> If the operator skips the `install -d` step, the web app creates the
+> directory on its first write — owned by `y8y`, group `y8y`, and the
+> scheduler can then neither write its delivery state nor read the
+> preferences. That is **fail-closed**: the scheduler refuses to send
+> anything (see below) and the audit script reports it. It is not a
+> silent partial failure.
+
+**Fail-closed on an unwritable state directory.** The delivery state is
+the only thing that prevents a reminder from being sent twice. So the
+scheduler probes the state directory *before* it sends anything: if the
+directory is not writable it stops with a clear message and sends
+**nothing**. A run that cannot record what it sent must not send.
+
+#### 5.2.5 Process hardening (defense in depth, not the boundary)
+
+`src/procguard.py` performs an in-process hardening, and `notify_runner.py`
 calls it as the first thing `main()` does — i.e. the process that
-*holds* the credentials is the one that closes its own exposure. The
-web service needs no change (it holds no secrets; hardening it would
-also take away core dumps for debugging, which is out of scope here).
+*holds* the credentials is the one that closes its own exposure. It sets
+`prctl(PR_SET_DUMPABLE, 0)`, after which:
+
+  * `/proc/<pid>/environ` → EACCES
+  * `/proc/<pid>/mem`    → EACCES
+  * ptrace attach        → refused (no longer depends on Yama)
+  * core dump            → not written (credentials do not land on disk)
+
+`/proc/<pid>/cmdline` and `/proc/<pid>/status` **stay readable** — so
+systemd's process supervision, `ps`, and the CI job that reads
+`/proc/<pid>/exe` keep working unchanged.
 
 | observation | before | after |
 | --- | --- | --- |
@@ -739,9 +765,15 @@ also take away core dumps for debugging, which is out of scope here).
 | core dump | possible | none |
 | `/proc/<pid>/cmdline`, `/status`, `/exe` | readable | **still readable** |
 
-The last row matters: systemd's process supervision, `ps`, and the CI
-job that reads `/proc/<pid>/exe` keep working unchanged. Only
-`environ` and `mem` are affected.
+With the separate system account of §5.2.3 this is the **second** layer,
+not the only one: the kernel already denies the read because the UIDs
+differ, and the hardening additionally covers the case where somebody
+later puts both units back on one account.
+
+Its known limitation: `execve()` resets the dumpable flag to 1, so
+between the Python interpreter starting and the process calling
+`prctl()` (tens of milliseconds) the environment of a *same-UID* peer
+is still readable. The separate account closes that window too.
 
 Linux 5.15's `/proc/<pid>/status` has no `Dumpable` field (checked
 against `fs/proc/array.c` v5.15), so the state cannot be read from
@@ -756,122 +788,82 @@ needed:
 Y8Y_NOTIFY_KEEP_DUMPABLE=1   # keep core dumps / gdb attach for this run
 ```
 
-**Known limitation:** the ~tens of milliseconds between the Python
-interpreter starting and `prctl()` running. `execve()` resets the
-dumpable flag to 1, so during that window the environment is still
-readable by a same-UID process. Only option B removes it.
+#### 5.2.6 Setup
 
-#### 5.2.7 Stage 2 — separate system user (manual, not part of this release)
-
-This changes the host: it creates a production system user and moves
-ownership of files. It is therefore **not** executed by this
-repository and **not** bundled into the PR — it is documented here so
-that the host operator can perform it deliberately, with a rollback.
-
-**Prerequisites.** A backup of the data directory (§7). Confirm the
-scheduler currently works (§5.1 "Verify before enabling").
-
-**Step 1 — create the account and the shared group.**
+The notification units are optional: a deployment that never installs
+them never creates the second account and is unaffected. Installing them
+requires three preparation steps — **before** the units are started.
 
 ```bash
-sudo groupadd --system y8y-notify-share
-sudo useradd --system --no-create-home \
-        --home-dir /var/lib/y8y-notify --shell /usr/sbin/nologin \
-        --gid y8y-notify-share y8y-notify
-sudo usermod --append --groups y8y-notify-share y8y
+# 1. The scheduler's own system account (and its group).
+sudo useradd --system --user-group --no-create-home \
+        --shell /usr/sbin/nologin y8y-notify
+
+# 2. The web account joins that group, so it can write the user
+#    preferences into the shared state directory.
+sudo usermod --append --groups y8y-notify y8y
+
+# 3. The state directory itself: owned by the scheduler, shared group,
+#    setgid so new files inherit the group.
+sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
 ```
 
-**Step 2 — let the scheduler read the task tree (read-only).**
-
-The scheduler needs to read every user's task files, but must not be
-able to modify them. Use a group ACL on the data directory rather than
-widening the mode bits:
+Then install the units as in §5.1 and enable the timer:
 
 ```bash
-sudo setfacl -R -m g:y8y-notify-share:r-X "$DATA"
-sudo setfacl -R -d -m g:y8y-notify-share:r-X "$DATA"
-```
-
-`-X` (execute only on directories) keeps traversal possible without
-granting write access. Do **not** use `chmod -R o+r` or `chmod 777`.
-
-**Step 3 — hand the three notification files to the shared group.**
-
-```bash
-sudo chgrp y8y-notify-share "$DATA/notification_settings.json" \
-                        "$DATA/notification_state.json" \
-                        "$DATA/notification_channels.json"
-sudo chmod 660 "$DATA/notification_settings.json" \
-               "$DATA/notification_state.json" \
-               "$DATA/notification_channels.json"
-```
-
-Ownership intent:
-
-| file | written by | read by | mode |
-| --- | --- | --- | --- |
-| `notification_settings.json` | web (`y8y`) | scheduler | `660` group-shared |
-| `notification_state.json` | scheduler | backup / operator | `660` group-shared |
-| `notification_channels.json` | scheduler | web (`y8y`) | `660` group-shared |
-
-If the files do not exist yet, create them as `root` with the group
-already set, or let the scheduler create them and then apply the
-`chgrp`/`chmod` above.
-
-**Step 4 — switch the unit.**
-
-```bash
-sudo sed -i 's/^User=.*/User=y8y-notify/' /etc/systemd/system/y8y-todo-notify.service
 sudo systemctl daemon-reload
-sudo systemctl restart y8y-todo-notify.timer
+sudo systemctl enable --now y8y-todo-notify.timer
 ```
 
-Leave `y8y-todo.service` on `User=y8y`. Do **not** add
-`y8y-todo-notify.env` to the web unit's `EnvironmentFile=` — that
-would undo the whole exercise.
+Notes:
 
-**Risks.**
+- `useradd --user-group` creates the group `y8y-notify` with the same
+  name. The web account is added to it as a **supplementary** group;
+  systemd applies the account's supplementary groups when it starts the
+  unit, so the web service can write the preferences without changing
+  its primary group.
+- The scheduler has **no home directory** and `nologin` — it is a
+  service account, never a login.
+- Step 3 must run **before** the first start. If the web app creates
+  the directory first, it gets the wrong owner and the scheduler cannot
+  write its delivery state (see the fail-closed note in §5.2.4).
+- The scheduler reads every user's task files (it computes digests for
+  all of them). That is not a widening — the web account already could —
+  but the account must be treated as trusted: no shell, no home.
 
-- If the ACL or group is missing, the scheduler cannot read the tasks
-  and silently delivers nothing. This is fail-closed (no data loss),
-  but it looks like "reminders stopped working" — check the journal
-  for permission errors first.
-- If the scheduler runs with the wrong UID it cannot write
-  `notification_state.json` and will re-send reminders it already
-  delivered (the occurrence key is per-file, so the file's content is
-  what protects you — losing it means duplicates, not data loss).
-- The notify account can read every user's private task files. That is
-  inherent to a digest scheduler and is not a regression (the shared
-  `y8y` UID already could), but treat the account as trusted: no
-  shell, no home directory, `nologin`.
-- The web user can no longer write `notification_state.json` — that is
-  intended; only the scheduler writes it.
-
-**Rollback.**
+**Rollback** (back to a single account, if the second one causes
+trouble) — the data files are not rewritten by any of this:
 
 ```bash
+sudo systemctl disable --now y8y-todo-notify.timer
 sudo sed -i 's/^User=.*/User=y8y/' /etc/systemd/system/y8y-todo-notify.service
-sudo systemctl daemon-reload && sudo systemctl restart y8y-todo-notify.timer
-sudo chgrp y8y "$DATA"/notification_*.json
-sudo chmod 600 "$DATA"/notification_*.json
-sudo setfacl -R -x g:y8y-notify-share "$DATA"
-sudo setfacl -R -d -x g:y8y-notify-share "$DATA"
-sudo userdel y8y-notify && sudo groupdel y8y-notify-share
+sudo systemctl daemon-reload
+# 状态目录归回 Web 账号, 调度器仍然能写
+sudo chown -R y8y:y8y /var/lib/y8y-todo/notify
 ```
 
-The rollback restores the previous behaviour exactly. **No task data is
-rewritten at any point** — the markdown files, their frontmatter and
-the JSON schemas are untouched by both the migration and the rollback;
-only ownership and group bits change.
+**Acceptance.** Run the audit script from §5.2.8 as root: every check
+must report `OK` and the script must exit `0`.
 
-**Acceptance.** Run the audit script from §5.2.8 as root: all five
-checks must report `OK` and the script must exit `0`.
+#### 5.2.7 What the scheduler may and may not do
+
+| | may | may not |
+| --- | --- | --- |
+| tasks | read | write, rename, delete |
+| `notification_settings.json` | read | write (the web owns the preferences) |
+| `notification_state.json` | write | — |
+| `notification_channels.json` | write | — |
+| `internal_tokens.json` | — | read *or* write |
+| the credential file | read (via systemd) | — |
+
+The web account is the mirror image: it may write the preferences and
+read the capability table, but it cannot rewrite the delivery state.
 
 #### 5.2.8 Audit script
 
 `scripts/check-notify-isolation.py` (wrapper: `scripts/check-notify-isolation.sh`)
 is a **read-only** audit. It never creates a user, never changes a
-mode, never starts or stops a service, and never reads the credential
+mode, never starts or stops a unit, and never reads the credential
 *values* (only the file's ownership and permission bits).
 
 ```bash
@@ -886,9 +878,12 @@ sudo python3 scripts/check-notify-isolation.py \
 | --- | --- |
 | C1 | the web unit and the notify unit do **not** run as the same user |
 | C2 | the credential file is owned by root and unreadable by group/other |
+| C2b | the web unit does **not** reference the credential file |
 | C3 | the running scheduler's UID differs from the web user's |
 | C4 | measured: the web user cannot read the scheduler's `/proc/<pid>/environ` |
-| C5 | the scheduler user can read the task tree and write the state files |
+| C5 | the scheduler user can read the task tree and **write the state directory** |
+| C6 | the web user can read the capability table and write the preferences |
+| C7 | the notify unit's writable paths do **not** cover the whole data directory |
 
 Exit codes: `0` = all checks passed, `1` = a check failed, `2` = a
 check could not be verified (for example C4 needs root and a running
@@ -896,7 +891,9 @@ scheduler). **`2` is not a pass.** Checks that cannot be decided are
 reported as `UNKNOWN` on purpose: a container or an unprivileged shell
 cannot emulate the target host's `/proc` and systemd behaviour, and
 this project does not want a simulated result presented as a
-production one.
+production one. The same rule applies *inside* the script: when a
+permission probe cannot be decided (dropping privileges failed, the
+helper process did not start), the result is `UNKNOWN` — never "OK".
 
 `--repo-packaging` makes the script audit the unit templates in
 `packaging/` instead of the installed ones — useful for CI.

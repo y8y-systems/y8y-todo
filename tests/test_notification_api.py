@@ -29,6 +29,7 @@ from notifications import (                                        # noqa: E402
     SettingsStore,
     StateStore,
     normalize_settings,
+    notify_state_dir,
 )
 from test_notifications import (                                  # noqa: E402
     ALICE,
@@ -66,8 +67,9 @@ def test_notification_settings_api_roundtrip(server):
     assert body['settings']['daily_digest'] is True
     assert body['settings']['digest_time'] == '07:30'
 
-    # 落盘了 (调度器读同一个文件)
-    stored = json.loads((tmp / 'data' / 'notification_settings.json').read_text(encoding='utf-8'))
+    # 落盘了 (调度器读同一个文件 —— 在专用状态目录里, 见 §5.2)
+    stored = json.loads(
+        (tmp / 'data' / 'notify' / 'notification_settings.json').read_text(encoding='utf-8'))
     assert stored['alice']['lead_minutes'] == 30
 
 
@@ -107,14 +109,17 @@ def _data_dir(server):
 
 def _scheduler_for_server(server, now, provider):
     data = _data_dir(server)
-    settings_store = SettingsStore(os.path.join(data, 'notification_settings.json'))
+    # 通知 JSON 都在专用状态目录里 —— 与 Web 服务读写的是同一个位置
+    # (docs/deployment.md §5.2)
+    state_dir = notify_state_dir(data)
+    settings_store = SettingsStore(os.path.join(state_dir, 'notification_settings.json'))
     normalized, err = normalize_settings(_enabled())
     assert err is None
     settings_store.set('alice', normalized)
     config = _make_config(data)
     return Scheduler(data, config, providers={'fake': provider},
                      settings_store=settings_store,
-                     state_store=StateStore(os.path.join(data, 'notification_state.json')),
+                     state_store=StateStore(os.path.join(state_dir, 'notification_state.json')),
                      now=now, tz=TZ)
 
 

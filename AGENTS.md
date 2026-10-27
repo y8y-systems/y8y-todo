@@ -80,6 +80,9 @@ git config --local user.email "y8y-systems@users.noreply.github.com"
 - ✅ **保留数据格式兼容性。** 磁盘格式（frontmatter 字段、`done/<date>/`、`lists/<id>/`、
   `persistent_projects.json`）一旦发布就不能被静默改写；要改必须走数据迁移方案 + 升级 runbook。
   新功能的偏好/状态一律用**旁挂文件**（如 `notification_settings.json`），不许塞进任务 frontmatter。
+  旁挂文件如果**两个进程都要写**，必须放在自己的子目录（如 `<data>/notify/`）——
+  `atomic_write` 要在**目录**里建临时文件再 rename，文件级权限挡不住，
+  给目录写权限又会波及同目录下的机器凭据（如 `internal_tokens.json`）。
 - ✅ 改动**认证 / 存储 / API** 时，**必须**补对应回归测试（见 §4）。
 - ⚠️ 与生产部署有关的任何操作，需要**单独授权**——本仓库的 CI 不部署生产。
 

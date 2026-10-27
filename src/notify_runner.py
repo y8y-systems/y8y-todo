@@ -33,10 +33,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from notifications import (                                          # noqa: E402
     CHANNELS_FILE,
     Message,
+    NotificationStateError,
     NotifyConfig,
     Scheduler,
     SettingsStore,
     _resolve_tz,
+    notify_state_dir,
     publish_capabilities,
     redact_secrets,
 )
@@ -128,11 +130,25 @@ def main(argv=None):
     scheduler = Scheduler(config.data_dir, config, now=now, tz=tz)
 
     # 能力表: 让 Web 端知道"谁能用哪个渠道" —— 不含任何凭据。
-    settings_store = SettingsStore(os.path.join(config.data_dir, 'notification_settings.json'))
-    publish_capabilities(os.path.join(config.data_dir, CHANNELS_FILE),
-                         config, scheduler.providers, users=settings_store.all().keys())
+    # 三个通知 JSON 都在专用状态目录里 (docs/deployment.md §5.2)。
+    state_dir = notify_state_dir(config.data_dir)
+    settings_store = SettingsStore(os.path.join(state_dir, 'notification_settings.json'))
+    try:
+        publish_capabilities(os.path.join(state_dir, CHANNELS_FILE),
+                             config, scheduler.providers, users=settings_store.all().keys())
+    except OSError as exc:
+        # 状态目录写不了 —— 能力表发不出去, Web 端看不到渠道。
+        # 这不是"凭据错了", 是部署没配好: 明确说出来, 别让运维去猜。
+        print(f'[notify] {NotificationStateError(state_dir, exc.strerror or str(exc))}',
+              file=sys.stderr)
+        return 1
 
-    report = scheduler.run(dry_run=args.dry_run)
+    try:
+        report = scheduler.run(dry_run=args.dry_run)
+    except NotificationStateError as exc:
+        # fail closed: 记不下投递状态就不发 —— 否则每次 tick 都会重发。
+        print(f'[notify] {exc}', file=sys.stderr)
+        return 1
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))

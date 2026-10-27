@@ -30,17 +30,19 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=y8y
-Group=y8y
+# 与正式调度单元同一个独立用户 (docs/deployment.md §5.2)
+User=y8y-notify
+Group=y8y-notify
 WorkingDirectory=/opt/y8y-todo/src
 # 与正式调度单元完全一致的环境文件 (凭据只在这里, 不进仓库、不进 argv)
 EnvironmentFile=-/etc/y8y-todo/y8y-todo.env
 EnvironmentFile=-/etc/y8y-todo/y8y-todo-notify.env
 ExecStart=/usr/bin/python3 /opt/y8y-todo/src/notify_runner.py --dry-run
-# 与主服务一致的加固: 唯一可写路径是数据目录
+# 与正式调度单元一致的加固: 唯一可写路径是通知状态目录
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/y8y-todo
+ReadWritePaths=-/var/lib/y8y-todo/notify
 PrivateTmp=true
+UMask=0022
 TimeoutStartSec=600

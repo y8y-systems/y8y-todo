@@ -10,12 +10,19 @@
 #   /opt/y8y-todo/src/notify_runner.py  调度器入口 (代码, root 拥有, 只读)
 #   /etc/y8y-todo/y8y-todo.env          身份/数据目录配置 (与服务共用)
 #   /etc/y8y-todo/y8y-todo-notify.env   通知凭据 (仅本单元使用, root:root 600)
-#   /var/lib/y8y-todo                   数据目录 (写通知设置与投递状态)
+#   /var/lib/y8y-todo/notify/           通知状态目录 (调度器与 Web 共享, 见下)
 #
 # ⚠️ 为什么通知凭据单独放一个 env 文件:
 #   y8y-todo.service **不** 读这个文件 —— Web 进程拿不到 LINE token /
 #   Resend key。Web 端只看调度器发布的"能力表"(哪个用户能用哪个渠道),
 #   里面没有任何凭据。
+#
+# ⚠️ 为什么调度器用**自己的**系统用户 (y8y-notify):
+#   内核对"能不能读别人进程的 /proc/<pid>/environ"是按 UID 判的: 同 UID
+#   直接放行。共用一个用户的话, 被攻破的 Web 进程能直接读出调度器的
+#   环境变量 —— 凭据等于公开。换成独立用户后内核直接拒绝, 这是内核
+#   强制的边界, 不是靠配置自觉。
+#   详见 docs/deployment.md §5.2。
 #
 # 安装:
 #   sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.service \
@@ -28,6 +35,12 @@
 #   sudo -e /etc/y8y-todo/y8y-todo-notify.env
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now y8y-todo-notify.timer
+#
+# ⚠️ 前提: 系统用户与状态目录必须先建好 (docs/deployment.md §5.2.2):
+#   sudo useradd --system --user-group --no-create-home \
+#           --shell /usr/sbin/nologin y8y-notify
+#   sudo usermod --append --groups y8y-notify y8y
+#   sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
 #
 # 想先看看会发什么 (不发送):
 #   sudo systemctl start y8y-todo-notify-dry-run.service
@@ -50,19 +63,25 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=y8y
-Group=y8y
+# 独立系统用户 —— 与 Web 服务 (y8y) 不同 UID, 凭据才真正隔离
+User=y8y-notify
+Group=y8y-notify
 WorkingDirectory=/opt/y8y-todo/src
 # 身份与数据目录 (与 Web 服务共用); 通知凭据单独一个文件, 只给本单元读。
 # 前缀 '-' = 文件不存在时不报错 (没配通知就完全不装这个单元)。
 EnvironmentFile=-/etc/y8y-todo/y8y-todo.env
 EnvironmentFile=-/etc/y8y-todo/y8y-todo-notify.env
 ExecStart=/usr/bin/python3 /opt/y8y-todo/src/notify_runner.py
-# 与主服务一致的加固: 唯一可写路径是数据目录
+# 与主服务一致的加固: **唯一**可写路径是通知状态目录。
+# 数据目录根部 (含 internal_tokens.json 这种机器凭据) 对本单元只读。
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/y8y-todo
+# 前缀 '-' = 目录不存在时不报错 (调度器会给出明确的失败提示, 而不是
+# 整个单元起不来)。数据目录本身可读 (要扫任务), 只有状态目录可写。
+ReadWritePaths=-/var/lib/y8y-todo/notify
 PrivateTmp=true
+# 文件权限跟随 umask (0022) —— 状态文件 group 可读, 另一个账号才读得到
+UMask=0022
 # 单次运行不该无限拖住 —— 10 分钟还没结束就杀掉 (下次 timer 会再拉起)
 TimeoutStartSec=600

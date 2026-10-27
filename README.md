@@ -221,19 +221,28 @@ the digest time.
   scheduler publishes a credential-free *capability table*
   (`notification_channels.json`) that says which user may use which
   channel; the web app only reads that.
+- The web service and the scheduler run as **two different system
+  accounts** (`y8y` and `y8y-notify`). The kernel refuses a cross-account
+  read of `/proc/<pid>/environ`, so a compromised web process cannot pull
+  the token out of the scheduler's process — this does not depend on any
+  permission bit or unit option.
+- The two accounts share exactly one directory, `notify/` under the data
+  directory, and nothing else: the scheduler may not write the task tree
+  nor the machine-to-machine credential file, and the web app may not
+  rewrite the delivery state.
 - Only tasks the recipient may see are ever considered: a task owned by
   another user is never included in somebody else's digest or reminder,
   and shared tasks are delivered once per entitled user.
 - Messages are plain text (no HTML), so task titles cannot inject markup
   into a mail client or a LINE message.
 - The scheduler **hardens its own process** at startup
-  (`prctl(PR_SET_DUMPABLE, 0)`): a same-UID process — for example a
+  (`prctl(PR_SET_DUMPABLE, 0)`): a same-account process — for example a
   compromised web service — cannot read the scheduler's
   `/proc/<pid>/environ`, so the credentials stay inside the process
-  that needs them. Every run reports `dumpable=0` in the journal. For
-  the full isolation analysis (and why the web and the scheduler should
-  eventually run as two different system users), see
-  [docs/deployment.md](docs/deployment.md) §5.2.
+  that needs them. Every run reports `dumpable=0` in the journal. This is
+  the second layer on top of the separate account; see
+  [docs/deployment.md](docs/deployment.md) §5.2 for the full isolation
+  model, the measurements behind it, and the rollback.
 
 ### Delivery guarantees
 
@@ -252,6 +261,12 @@ the digest time.
 ### Install (server side)
 
 ```bash
+# 0. The scheduler's own account + the shared state directory.
+sudo useradd --system --user-group --no-create-home \
+        --shell /usr/sbin/nologin y8y-notify
+sudo usermod --append --groups y8y-notify y8y
+sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+
 # 1. Units + env file (credentials stay on the server, root:root 600).
 sudo cp /opt/y8y-todo/packaging/y8y-todo-notify.{service,timer} \
         /etc/systemd/system/
@@ -289,16 +304,25 @@ Todo app itself is unaffected.
 
 ### New data files
 
-The notification system adds three **side-car** files in the data
-directory root. They are not part of the task format, no task file is
-ever rewritten, and removing them only resets notification preferences
-and history:
+The notification system adds three **side-car** files in a dedicated
+`notify/` sub-directory of the data directory. They are not part of the
+task format, no task file is ever rewritten, and removing them only
+resets notification preferences and history:
 
 | File | Contents |
 | --- | --- |
 | `notification_settings.json` | per-user preferences (channels, lead time, digest time) |
 | `notification_state.json` | delivery state — what was already sent, retry counters |
 | `notification_channels.json` | credential-free capability table written by the scheduler |
+
+They live in their own directory (not in the data directory root) because
+the scheduler and the web app both need to write in there, and `atomic_write`
+creates a temporary file *in the same directory* before renaming it over
+the target — which needs **write + execute on the directory**, not on the
+file. Giving the scheduler write access to the data directory root would
+therefore also let it replace `internal_tokens.json`, the machine-to-machine
+credential map. The dedicated directory keeps "both may write here, nowhere
+else" true.
 
 ## Backups, restore, upgrades
 

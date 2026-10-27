@@ -10,12 +10,23 @@ from the web server:
 Nothing here mutates task files.  The scheduler only **reads** tasks and
 writes two side-car files inside the data directory:
 
-``notification_settings.json``
+``<data_dir>/notify/notification_settings.json``
     per-user preferences (which channels, lead time, daily digest).
     No secrets — secrets live in the server's environment only.
 
-``notification_state.json``
+``<data_dir>/notify/notification_state.json``
     delivery bookkeeping (what was already sent, retry counters).
+
+``<data_dir>/notify/notification_channels.json``
+    the credential-free capability table the web app renders.
+
+All three live in a **dedicated state directory** (``<data_dir>/notify``)
+rather than in the data directory root: the scheduler runs under its own
+system account and needs write access to its own state, but the data
+directory root also holds ``internal_tokens.json`` — a machine
+credential the scheduler must never be able to replace. One small
+directory both accounts may write; nothing else (see docs/deployment.md
+§5.2).
 
 Both files are **additive**: the on-disk task format is untouched, so an
 upgrade never rewrites existing data (see AGENTS.md §3).
@@ -47,6 +58,7 @@ from taskstore import (
     can_access,
     display_title,
     parse_frontmatter,
+    probe_writable,
     scan_md_files,
     task_owner,
 )
@@ -57,6 +69,7 @@ __all__ = [
     'EmailProvider',
     'LineProvider',
     'Message',
+    'NotificationStateError',
     'NotifyConfig',
     'Provider',
     'ProviderError',
@@ -67,6 +80,7 @@ __all__ = [
     'build_providers',
     'default_settings',
     'normalize_settings',
+    'notify_state_dir',
     'publish_capabilities',
     'register_provider',
     'registered_channels',
@@ -79,6 +93,15 @@ STATE_FILE = 'notification_state.json'
 CHANNELS_FILE = 'notification_channels.json'
 STATE_VERSION = 1
 CAPABILITIES_VERSION = 1
+
+#: 通知状态目录名 (相对数据目录)。
+#:
+#: 三个通知 JSON 全部放在这个**专用目录**里, 而不是数据目录根部 ——
+#: 原因见 docs/deployment.md §5.2: 通知调度器以独立的系统用户运行,
+#: 它需要写自己的投递状态, 但**不能**对数据目录有写权限 (那里还有
+#: internal_tokens.json 这种机器凭据)。专用目录是"两边都能写、
+#: 别的都碰不到"的那一小块。
+NOTIFY_DIR_NAME = 'notify'
 
 #: LINE push 文本上限 5000 字符; 留出余量并按条切分 (LINE 单次 push 最多 5 条)
 LINE_CHUNK_SIZE = 4000
@@ -100,6 +123,43 @@ _TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
 
 def _flag(value):
     return (value or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+# ── 状态目录 ──────────────────────────────────────────────────────────
+def notify_state_dir(data_dir):
+    """通知状态目录的绝对路径 (``<data_dir>/notify``)。
+
+    三个通知 JSON 都住在这里。两个服务账号 (Web ``y8y`` / 调度器
+    ``y8y-notify``) 共享这一个目录, 数据目录根部则保持对调度器只读。
+    """
+    return os.path.join(str(data_dir), NOTIFY_DIR_NAME)
+
+
+class NotificationStateError(Exception):
+    """通知状态目录不可写 —— 宁可一条都不发, 也不要重复发送。
+
+    投递状态是"不重复发送"的唯一依据: 记录不下来, 每一次 tick 都会把
+    同一条提醒重发一遍。所以这个错误是 **fail closed** 的 —— 调度器在
+    发出任何通知之前先探一次目录可写性, 探不过就整体停下来。
+    """
+
+    def __init__(self, directory, detail=''):
+        self.directory = directory
+        self.detail = detail
+        super().__init__(self._message())
+
+    def _message(self):
+        lines = [
+            f'通知状态目录不可写: {self.directory}',
+            '调度器无法记录投递状态 —— 继续发送会导致同一条提醒被反复发送, '
+            '因此本次不发送任何通知。',
+            '修复 (以 root 执行):',
+            f'  sudo install -d -o y8y-notify -g y8y-notify -m 2770 {self.directory}',
+            '详见 docs/deployment.md §5.2。',
+        ]
+        if self.detail:
+            lines.insert(1, f'  ({self.detail})')
+        return '\n'.join(lines)
 
 
 def _parse_targets(raw):
@@ -331,6 +391,33 @@ class StateStore:
     def __init__(self, path):
         self.path = path
         self.data = self._read()
+
+    @property
+    def directory(self):
+        return os.path.dirname(str(self.path))
+
+    def ensure_writable(self):
+        """确认状态文件所在目录可写 —— 写不了就**不能**发通知。
+
+        投递状态是"不重复发送"的唯一依据: 记录不下来的话, 每一轮
+        都会把同样的提醒再发一遍。所以这个检查放在**发出任何通知之前**
+        —— 探不过就整体停下来 (fail closed)。
+
+        抛 NotificationStateError = 不可写; 返回 True = 可写。
+        """
+        directory = self.directory
+        if probe_writable(directory):
+            return True
+        detail = ''
+        if not os.path.isdir(directory):
+            detail = '目录不存在'
+        else:
+            try:
+                info = os.stat(directory)
+                detail = f'属主 uid={info.st_uid}, 权限 {info.st_mode & 0o777:04o}'
+            except OSError as exc:
+                detail = exc.strerror or str(exc)
+        raise NotificationStateError(directory, detail)
 
     def _read(self):
         empty = {'version': STATE_VERSION, 'reminders': {}, 'digests': {}}
@@ -822,10 +909,13 @@ class Scheduler:
         self.data_dir = str(data_dir)
         self.config = config
         self.providers = providers if providers is not None else build_providers(config)
+        # 三个通知 JSON 都在专用状态目录里 —— 见 notify_state_dir()。
+        state_dir = notify_state_dir(self.data_dir)
+        self.state_dir = state_dir
         self.settings_store = settings_store or SettingsStore(
-            os.path.join(self.data_dir, SETTINGS_FILE))
+            os.path.join(state_dir, SETTINGS_FILE))
         self.state_store = state_store or StateStore(
-            os.path.join(self.data_dir, STATE_FILE))
+            os.path.join(state_dir, STATE_FILE))
         self.tz = tz or _resolve_tz(config.timezone)
         self.now = now
         self.log = []
@@ -851,6 +941,12 @@ class Scheduler:
         if not users:
             report['skipped'].append({'reason': 'no user has enabled notifications'})
             return report
+
+        if not dry_run:
+            # 投递状态是"不重复发送"的唯一依据: 写不进去 = 每轮都会重发。
+            # 所以先探一次状态目录可写性, 探不过就**一条都不发**
+            # (fail closed) —— 而不是发完才发现记不下来。
+            self.state_store.ensure_writable()
 
         tasks = scan_tasks(self.data_dir, self.config.default_owner)
         live_keys = set()

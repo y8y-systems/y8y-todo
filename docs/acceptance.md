@@ -322,6 +322,10 @@ Todo app must be unaffected.
 >         /etc/systemd/system/
 > sudo systemctl daemon-reload
 > ```
+>
+> ℹ️ The three notification JSON files live in a dedicated `notify/`
+> sub-directory of the data directory (`$DATA/notify/`), not in the data
+> directory root — see `docs/deployment.md` §5.2.4.
 
 ```bash
 # 0. Nothing is configured yet → the scheduler must be a no-op, and the
@@ -370,7 +374,7 @@ sudo grep -c "EnvironmentFile" /etc/systemd/system/y8y-todo.service
 #    → must not mention y8y-todo-notify.env
 
 # b. The capability table the web app reads must contain no secrets.
-sudo python3 -c "import json;d=json.load(open('$DATA/notification_channels.json'));\
+sudo python3 -c "import json;d=json.load(open('$DATA/notify/notification_channels.json'));\
 print(json.dumps(d)[:2000])"
 #    → no token, no api key, no "secret"
 
@@ -391,7 +395,7 @@ secrets = [s for s in secrets if s]
 journal = subprocess.run(
     ['journalctl', '-u', 'y8y-todo-notify-dry-run.service', '--no-pager'],
     capture_output=True, text=True).stdout
-state = pathlib.Path('/var/lib/y8y-todo/notification_state.json')
+state = pathlib.Path('/var/lib/y8y-todo/notify/notification_state.json')
 blobs = [journal, state.read_text() if state.exists() else '']
 argv = subprocess.run(['ps', '-eo', 'args'], capture_output=True, text=True).stdout
 blobs.append(argv)
@@ -411,7 +415,7 @@ file, or in a process argument list.
 # Run twice in a row — the second run must not re-send anything.
 sudo systemctl start y8y-todo-notify.service
 sudo systemctl start y8y-todo-notify.service
-sudo python3 -c "import json;print(json.dumps(json.load(open('$DATA/notification_state.json')),indent=2))"
+sudo python3 -c "import json;print(json.dumps(json.load(open('$DATA/notify/notification_state.json')),indent=2))"
 #    → each occurrence appears exactly once, with its delivery status
 ```
 
@@ -424,11 +428,32 @@ These steps need a real host (real systemd, real `/proc`) and **root**.
 They cannot be simulated in a container — see the "Unverified" note at
 the end.
 
-```bash
-# 0. Baseline: the scheduler runs as the same user as the web service.
-systemctl show -p User y8y-todo.service y8y-todo-notify.service
-#    → both "y8y"   ← this is the condition that makes the check below fail
+The shipped configuration runs the two services under **two different
+system accounts** (`y8y` for the web app, `y8y-notify` for the
+scheduler). That is the primary boundary: the kernel refuses a
+cross-account read of `/proc/<pid>/environ` before any permission bit is
+consulted. The in-process hardening (`PR_SET_DUMPABLE=0`) is the second
+layer.
 
+```bash
+# 0. Baseline: the two units must NOT share a user.
+systemctl show -p User y8y-todo.service y8y-todo-notify.service
+#    → "y8y" and "y8y-notify"   ← PASS
+#    → both "y8y"               ← FAIL: see §5.2.6 for the setup steps
+
+# 0b. The state directory must be the scheduler's, shared with the web
+#     account through the group, and setgid so new files inherit it.
+ls -ld /var/lib/y8y-todo/notify
+#    → drwxrws---+ 1 y8y-notify y8y-notify /var/lib/y8y-todo/notify
+#      (mode 2770; the leading 's' is the setgid bit)
+
+# 0c. The scheduler may not be able to write the data directory root.
+sudo -u y8y-notify test ! -w /var/lib/y8y-todo
+#    → exit 0   ← PASS
+#    → exit 1   ← FAIL: the scheduler could replace internal_tokens.json
+```
+
+```bash
 # 1. The scheduler must have hardened itself (PR_SET_DUMPABLE = 0).
 #    Linux 5.15's /proc/<pid>/status has NO "Dumpable" field, so the
 #    process must report it itself — the runner prints it on every run.
@@ -444,6 +469,9 @@ PID=$(pgrep -f 'notify_runner.py' | head -1)
 sudo -u y8y cat /proc/$PID/environ >/dev/null
 #    → cat: /proc/<pid>/environ: Permission denied   ← PASS
 #    → (contents printed)                              ← FAIL, escalate
+#    (With two accounts this is denied by the kernel itself; with one
+#     account it is denied by PR_SET_DUMPABLE=0 — either way it must
+#     not print anything.)
 
 # 3. The control group: cmdline must stay readable, so systemd, ps and
 #    the CI job that reads /proc/<pid>/exe keep working.
@@ -460,33 +488,52 @@ sudo python3 /opt/y8y-todo/scripts/check-notify-isolation.py \
         --unit-dir /etc/systemd/system \
         --env-file /etc/y8y-todo/y8y-todo-notify.env \
         --data-dir /var/lib/y8y-todo
-#    → all five checks OK, exit code 0
-#    → "C1 FAIL" means both units still share a user: see §5.2.7
+#    → every check OK, exit code 0
+#    → "C1 FAIL" means both units still share a user: see §5.2.6
+#    → exit code 2 means a check could not be VERIFIED (e.g. no running
+#      scheduler): that is NOT a pass — fix the setup and re-run
 ```
 
-**Pass:** step 1 shows `dumpable=0`; step 2 is denied; step 3 still
-reads; step 4 shows no credential file in the web unit; step 5 exits 0.
+**Pass:** step 0 shows two different users; step 0b shows mode `2770`
+owned by `y8y-notify:y8y-notify`; step 0c shows the data directory root
+is not writable by the scheduler; step 1 shows `dumpable=0`; step 2 is
+denied; step 3 still reads; step 4 shows no credential file in the web
+unit; step 5 exits `0` with every check `OK`.
 
 Note: Linux 5.15 (the Ubuntu 22.04 kernel) has **no** `Dumpable` field
 in `/proc/<pid>/status` — checked against `fs/proc/array.c` v5.15 — so
 the dumpable state has to be read from the process's own output, which
 is why the runner prints `dumpable=0` on every run.
 
-**Expected state today, before stage 2 (separate system user):**
-step 5 reports `C1 FAIL` and `C3 FAIL` — that is the known, documented
-gap of §5.2.7 and the reason the stage-2 migration exists. The
-credential read in step 2 must nevertheless be denied, because the
-scheduler hardens itself (§5.2.6). If step 2 succeeds, the scheduler
-is running an old copy of `src/procguard.py` or the hardening was
-disabled with `Y8Y_NOTIFY_KEEP_DUMPABLE=1`.
+**Fail-closed behaviour.** If the state directory is missing or not
+writable by the scheduler, the scheduler sends **nothing** and exits
+non-zero with an explicit message — it never sends a reminder it cannot
+record. Verify it by making the directory unwritable for the scheduler:
+
+```bash
+sudo chmod 0550 /var/lib/y8y-todo/notify
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo systemctl show -p ExecMainStatus y8y-todo-notify-dry-run.service
+#    → ExecMainStatus=1  and the journal names the directory
+sudo chmod 2770 /var/lib/y8y-todo/notify    # restore
+```
+
+**Expected state today:** with the two-account setup applied, steps 0–5
+all pass. If the operator has *not* yet applied the §5.2.6 setup, step 0
+reports two `y8y` users and the audit reports `C1 FAIL` — that is the
+expected "not yet migrated" state, and step 2 must nevertheless be
+denied, because the scheduler hardens itself (§5.2.5). If step 2
+succeeds, the scheduler is running an old copy of `src/procguard.py` or
+the hardening was disabled with `Y8Y_NOTIFY_KEEP_DUMPABLE=1`.
 
 **Not verified by this repository:** the behaviour of systemd 249's
-real unit files, `/proc` access across two real system users, and the
-ownership/ACL migration of §5.2.7 were all developed and reasoned
-about against the kernel and systemd sources, but the actual
-production host is the only place they can be confirmed. The audit
-script above is the instrument for that confirmation; run it as root
-and paste the output into the deployment report.
+real unit files and `/proc` access across two real system users were
+developed and reasoned about against the kernel and systemd sources,
+but the actual production host is the only place they can be confirmed.
+The audit script above is the instrument for that confirmation; run it as
+root and paste the output into the deployment report. The audit reports
+`UNKNOWN` — exit code `2` — for anything it cannot decide, and `UNKNOWN`
+is deliberately **not** treated as a pass.
 
 ## 10. Run the full test suite and CI
 

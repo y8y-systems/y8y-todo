@@ -27,6 +27,7 @@ from config import Config
 # channel) into the data dir; the API below just reads it.
 from notifications import (
     Capabilities,
+    NOTIFY_DIR_NAME,
     SettingsStore as NotificationSettingsStore,
     normalize_settings,
     registered_channels,
@@ -101,8 +102,8 @@ SHOPPING_DIR = str(CONFIG.shopping_dir)
 INTERNAL_TOKENS_FILE = str(CONFIG.internal_tokens_file)
 PERSISTENT_PROJECTS_FILE = str(CONFIG.persistent_projects_file)
 # 通知: 每用户偏好 + 渠道能力表 (调度器发布, 只读)
-NOTIFICATION_SETTINGS_FILE = os.path.join(TODOLIST_DIR, 'notification_settings.json')
-NOTIFICATION_CHANNELS_FILE = os.path.join(TODOLIST_DIR, 'notification_channels.json')
+NOTIFICATION_SETTINGS_FILE = os.path.join(TODOLIST_DIR, NOTIFY_DIR_NAME, 'notification_settings.json')
+NOTIFICATION_CHANNELS_FILE = os.path.join(TODOLIST_DIR, NOTIFY_DIR_NAME, 'notification_channels.json')
 
 
 def notification_settings_payload(user):
@@ -1324,7 +1325,16 @@ class TodolistHandler(http.server.BaseHTTPRequestHandler):
                 self._send_error(err, 400)
                 return
             store = NotificationSettingsStore(NOTIFICATION_SETTINGS_FILE)
-            store.set(user, settings)
+            try:
+                store.set(user, settings)
+            except OSError as exc:
+                # 状态目录没配好 (权限/属主不对) —— 告诉调用方, 别让它
+                # 以为"保存成功但没生效"。
+                self._send_error(
+                    'Notification state directory is not writable: '
+                    f'{os.path.dirname(NOTIFICATION_SETTINGS_FILE)} '
+                    f'({exc.strerror or exc})', 500)
+                return
             payload = notification_settings_payload(user)
             payload['settings'] = settings
             self._send_json(payload)
@@ -1738,10 +1748,17 @@ def _cleanup_stale_tmp_files():
 
     崩溃时 tmp 可能残留; 它们不是任务数据(列表只扫 .md), 但会污染
     数据目录。启动时清理一次即可, 正常写入会原子替换。
+
+    ⚠️ 通知状态目录 (``<data_dir>/notify``) **必须跳过**: 那是通知
+    调度器 (另一个系统用户) 的目录, 它的临时文件可能正好在写 ——
+    被这里删掉的话, 调度器的 os.replace 会失败, 投递状态就丢了。
     """
     if not os.path.isdir(TODOLIST_DIR):
         return
+    notify_dir = os.path.abspath(os.path.join(TODOLIST_DIR, NOTIFY_DIR_NAME))
     for root, _dirs, files in os.walk(TODOLIST_DIR):
+        if os.path.abspath(root) == notify_dir:
+            continue
         for fn in files:
             if fn.endswith('.tmp'):
                 try:

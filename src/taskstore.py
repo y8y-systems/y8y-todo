@@ -43,6 +43,7 @@ __all__ = [
     'build_frontmatter',
     'display_title',
     'parse_frontmatter',
+    'probe_writable',
     'scan_md_files',
     'task_owner',
     'can_access',
@@ -52,6 +53,16 @@ __all__ = [
 
 
 # ── 原子写 ────────────────────────────────────────────────────────────
+def _tmp_path(path):
+    """同目录下的唯一临时文件名。
+
+    名字带 pid + 随机后缀, 两个进程同时写同一个文件时不会互相踩踏,
+    而且外部无法预先猜中名字去放一个同名符号链接 (配合 O_EXCL 拒绝
+    已存在的路径)。
+    """
+    return f'{path}.{os.getpid()}.{os.urandom(4).hex()}.tmp'
+
+
 def atomic_write(path, text):
     """Write text to path atomically (tmp file + rename).
 
@@ -59,14 +70,57 @@ def atomic_write(path, text):
     behind; readers see either the old or the new content, never a mix.
     Missing parent directories are created on demand (fresh deployments
     start with an empty data directory).
+
+    The temporary file is opened with ``O_EXCL``, so a pre-planted
+    symlink can never redirect the write somewhere else. That matters
+    because the notification state directory is written by **two**
+    service accounts (the web app and the scheduler — see
+    docs/deployment.md §5.2). The resulting permissions are unchanged:
+    ``os.open`` applies the process umask exactly like ``open()`` did.
     """
-    tmp = f'{path}.tmp'
+    tmp = _tmp_path(path)
     parent = os.path.dirname(tmp)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(text)
-    os.replace(tmp, path)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        # 写失败时不要把半截临时文件留在目录里。
+        # 只删**我们刚创建**的那个 —— os.open 失败 (例如路径已存在) 时
+        # 那个文件不是我们的, 不能动。
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def probe_writable(directory):
+    """确认目录可写 —— 建一个临时文件再删掉。
+
+    比 ``os.access()`` 可靠: 它模拟的正是 ``atomic_write`` 的真实动作
+    (在目标目录里创建临时文件), 因此 ACL / setgid / 属主这些真实生效的
+    规则都会被算进去。目录不存在 → 不可写。
+
+    只在需要"写之前先确认"的地方用 (通知调度器在发出任何通知之前会
+    探一次) —— 它会短暂地在目录里留下一个空文件。
+    """
+    if not os.path.isdir(directory):
+        return False
+    tmp = _tmp_path(os.path.join(directory, 'probe'))
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError:
+        return False
+    os.close(fd)
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    return True
 
 
 # ── frontmatter 序列化 ────────────────────────────────────────────────

@@ -39,6 +39,7 @@ from notifications import (                                        # noqa: E402
     chunk_text,
     default_settings,
     normalize_settings,
+    notify_state_dir,
     publish_capabilities,
     registered_channels,
     scan_tasks,
@@ -106,12 +107,15 @@ def _make_config(data_dir, **extra):
 
 
 def _make_scheduler(data_dir, providers, now, settings=None, **env_extra):
-    settings_store = SettingsStore(os.path.join(str(data_dir), 'notification_settings.json'))
+    # 通知 JSON 都在专用状态目录里 (docs/deployment.md §5.2) —— 与 Web
+    # 服务读写的是同一个位置
+    state_dir = notify_state_dir(data_dir)
+    settings_store = SettingsStore(os.path.join(state_dir, 'notification_settings.json'))
     for user, raw in (settings or {}).items():
         normalized, err = normalize_settings(raw)
         assert err is None, err
         settings_store.set(user, normalized)
-    state_store = StateStore(os.path.join(str(data_dir), 'notification_state.json'))
+    state_store = StateStore(os.path.join(state_dir, 'notification_state.json'))
     config = _make_config(data_dir, **env_extra)
     return Scheduler(data_dir, config, providers=providers,
                      settings_store=settings_store, state_store=state_store,
@@ -495,7 +499,8 @@ def test_failed_state_is_persisted_across_processes(tmp_path):
                             settings={'alice': _enabled()})
     sched.run()
 
-    state = json.loads((data / 'notification_state.json').read_text(encoding='utf-8'))
+    state = json.loads(
+        (data / 'notify' / 'notification_state.json').read_text(encoding='utf-8'))
     entry = list(state['reminders'].values())[0]
     assert entry['channels']['fake']['status'] == 'failed'
     assert entry['channels']['fake']['attempts'] == 1
@@ -512,7 +517,7 @@ def test_state_prunes_stale_entries(tmp_path):
                             now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
                             settings={'alice': _enabled()})
     sched.run()
-    state_file = data / 'notification_state.json'
+    state_file = data / 'notify' / 'notification_state.json'
     assert json.loads(state_file.read_text(encoding='utf-8'))['reminders']
 
     # 任务被删掉 → 记录暂时保留 (保留期内"复活"不重复提醒)
@@ -675,7 +680,7 @@ def test_dry_run_does_not_send_or_write(tmp_path):
     report = sched.run(dry_run=True)
     assert provider.sent == []
     assert report['planned']
-    assert not (data / 'notification_state.json').exists()
+    assert not (data / 'notify' / 'notification_state.json').exists()
 
 
 def test_scan_tasks_ignores_done_and_broken_files(tmp_path):
