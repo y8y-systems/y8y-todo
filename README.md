@@ -371,11 +371,33 @@ makes that true:
   API is called, so a crash between "sent" and "recorded" leaves a
   `sending` marker instead of an empty slot — the next round does not send
   again (a lost message is preferred over a duplicate one);
-- a state file that cannot be read or is not valid JSON **stops** the
-  scheduler instead of being treated as an empty history (which would
-  re-send everything); a *missing* state file is a normal first run;
+- a state file that cannot be read, is not valid JSON, or contains a
+  malformed **record** (a reminder whose `channels` entry has the wrong
+  type, a channel state with no `status`, a digest entry that is not an
+  object — anything that would make "did this already go out?" unanswerable)
+  **stops** the scheduler instead of being treated as an empty history
+  (which would re-send everything); a *missing* state file is a normal
+  first run;
+- the state file is written with `fsync` (file **and** directory entry). If
+  the flush fails — full disk, I/O error — the scheduler stops before
+  sending: a record that never reached the platter is not a record;
 - an `flock` on `notification.lock` serialises whole runs, so two timer
   ticks can never claim the same notification.
+
+**Recovering a corrupt state file**: stop the timer, back the file up,
+repair it, then start the timer again — in that order.
+
+```bash
+sudo systemctl stop y8y-todo-notify.timer
+sudo cp /var/lib/y8y-todo/notify/notification_state.json \
+        /var/lib/y8y-todo/notify/notification_state.json.broken
+# repair the file, then: python3 -m json.tool <file> > /dev/null
+sudo systemctl start y8y-todo-notify.timer
+```
+
+Do **not** simply move the state file aside and let the scheduler rebuild
+it: that throws away the entire dedup history, and every reminder that
+already went out will be sent again.
 
 ## Backups, restore, upgrades
 

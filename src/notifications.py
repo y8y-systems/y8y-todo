@@ -55,10 +55,17 @@ Safety rules baked into this module:
    which the next round treats as final (a lost message is preferred over
    a duplicate one).
 6. **Fail closed.** An unreadable or corrupt state file stops the
-   scheduler instead of being treated as an empty history; a *missing*
+   scheduler instead of being treated as an empty history — that includes
+   malformed *records* inside it (a reminder without a usable ``channels``
+   map, a channel state without a recognised ``status``, a ``digests``
+   entry that is not an object): such a record cannot answer "did this
+   already go out?", and assuming "no" would re-send it. A *missing*
    state file is a normal first run. Two scheduler processes are
    serialised by an ``flock``, so they can never claim the same
    notification.
+7. **Durable before it counts.** The state file is written with ``fsync``
+   (file and directory entry). If the flush fails, the run stops before
+   sending — a record that never reached the platter is not a record.
 """
 try:
     import fcntl                     # POSIX 文件锁 —— 跨进程互斥
@@ -241,10 +248,17 @@ class NotificationStateCorrupt(NotificationStateError):
             f'通知投递状态文件损坏: {self.path}',
             '无法读取投递状态 —— 若把它当成全新状态继续投递, 同一条提醒会'
             '被反复发送, 因此本次不发送任何通知。',
-            '处理 (以 root 执行):',
-            f'  sudo mv {self.path} {self.path}.broken',
-            '  # 移走损坏文件后调度器会重建状态 (已发出的记录会丢失, '
-            '请按需人工核对)',
+            '',
+            '恢复步骤 (以 root 执行, **按顺序**):',
+            '  1) sudo systemctl stop y8y-todo-notify.timer   # 先停调度器',
+            '  2) sudo cp ' + self.path + ' ' + self.path + '.broken   # 备份现场',
+            '  3) 修好状态文件 (从备份恢复, 或修正损坏的 JSON); 验证:',
+            '     python3 -m json.tool ' + self.path + ' > /dev/null',
+            '  4) sudo systemctl start y8y-todo-notify.timer',
+            '',
+            '⚠ 不要直接移走状态文件就启动发送 —— 那等于丢掉全部历史判重'
+            '记录, 已经发过的提醒会被重新投递一遍。必须先停 Timer、备份、'
+            '核对状态, 再恢复发送。',
             '详见 docs/deployment.md §5.2。',
         ]
         if self.detail:
@@ -530,6 +544,16 @@ class SettingsStore:
 
 
 # ── 投递状态 ──────────────────────────────────────────────────────────
+def _short_key(key, limit=48):
+    """判重键的短版本 —— 只用于错误消息。
+
+    键是 ``user|owner|folder/basename|created|dueTdue_time``, 可能很长;
+    报错时截断一下, 免得刷屏, 但要能让人定位到是哪一条记录坏了。
+    """
+    text = str(key)
+    return text if len(text) <= limit else text[:limit] + '…'
+
+
 class StateStore:
     """投递状态: 防止重复发送 (at-most-once)。
 
@@ -643,19 +667,82 @@ class StateStore:
         data.setdefault('version', STATE_VERSION)
         data.setdefault('reminders', {})
         data.setdefault('digests', {})
+        self._check_records(data)
         return data
+
+    def _check_records(self, data):
+        """校验**记录内部**的结构 —— 判重依据坏了就必须停发。
+
+        ``reminder()`` / ``channel_state()`` / ``digest_state()`` 对类型
+        不对的记录一律返回 None, 而 None 的含义是"没发过" —— 如果就这么
+        放过, 一条损坏的记录会让同一条提醒**重新投递一遍**。所以在读盘
+        时就把结构问题挑出来 fail closed, 而不是等到投递时才发现。
+
+        只校验"影响判重"的必要结构, 不引入完整的 JSON Schema:
+
+        * ``reminders[key]``            必须是对象;
+        * ``reminders[key].channels``   必须是对象 (渠道 → 投递记录);
+        * ``reminders[key].channels[c]`` 必须是对象, 且 ``status`` 是
+          已知状态 —— 少了或写错了 status, 就没法判断这条到底发没发;
+        * ``digests[key]``             必须是对象, 且 ``status`` 是
+          已知状态。
+
+        已知状态 = 既有终态 (sent / failed / exhausted / missed) 加上写前
+        持久化留下的中间态 (sending) —— 也就是这个模块自己会写出来的
+        全部取值, 历史状态文件同样满足。
+        """
+        for key, entry in data['reminders'].items():
+            if not isinstance(entry, dict):
+                raise NotificationStateCorrupt(
+                    self.path, f'reminders[{_short_key(key)}] 不是一个对象')
+            channels = entry.get('channels')
+            if not isinstance(channels, dict):
+                raise NotificationStateCorrupt(
+                    self.path,
+                    f'reminders[{_short_key(key)}].channels 不是一个对象')
+            for name, state in channels.items():
+                if not isinstance(state, dict):
+                    raise NotificationStateCorrupt(
+                        self.path,
+                        f'reminders[{_short_key(key)}].channels[{name}] 不是一个对象')
+                self._check_status(state, f'reminders[{_short_key(key)}].channels[{name}]')
+
+        for key, entry in data['digests'].items():
+            if not isinstance(entry, dict):
+                raise NotificationStateCorrupt(
+                    self.path, f'digests[{_short_key(key)}] 不是一个对象')
+            self._check_status(entry, f'digests[{_short_key(key)}]')
+
+    def _check_status(self, entry, where):
+        """状态字段必须是这个模块写得出来的已知状态。"""
+        status = entry.get('status')
+        if not isinstance(status, str) or status not in BLOCKED_STATUSES:
+            raise NotificationStateCorrupt(
+                self.path,
+                f'{where}.status 不是已知状态 ({status!r}) —— '
+                f'已知: {", ".join(BLOCKED_STATUSES)}')
 
     def save(self):
         """把投递状态落盘。
 
         ``fsync=True``: 这份文件是"已经尝试过投递"的唯一记录, 掉电
         丢失就意味着同一条 LINE 消息会被发两遍 —— 所以这里真的刷盘。
+
+        刷盘失败 (磁盘满 / IO 错误 / 文件系统只读) → 抛
+        ``NotificationStateError``: 记不下来就不能发, 否则这一轮发出去的
+        消息下一轮会再发一遍。调用方在 ``send()`` **之前**调用本方法,
+        所以这里抛出去就等于"这一条一条都不发"。
         """
         self.data['version'] = STATE_VERSION
         self.data['updated_at'] = datetime.now(_timezone.utc).isoformat()
-        atomic_write(self.path,
-                     json.dumps(self.data, ensure_ascii=False, indent=2, sort_keys=True),
-                     fsync=True)
+        try:
+            atomic_write(self.path,
+                         json.dumps(self.data, ensure_ascii=False, indent=2, sort_keys=True),
+                         fsync=True)
+        except OSError as exc:
+            raise NotificationStateError(
+                self.directory,
+                f'状态落盘失败 (刷盘未完成): {exc.strerror or str(exc)}')
 
     # ── reminders ──
     def reminder(self, key):

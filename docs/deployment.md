@@ -802,6 +802,46 @@ scheduler probes the state directory *before* it sends anything: if the
 directory is not writable it stops with a clear message and sends
 **nothing**. A run that cannot record what it sent must not send.
 
+**Fail-closed on a corrupt state file.** The same rule applies to the
+*content* of `notification_state.json`: if it cannot be read, is not valid
+JSON, or contains a malformed record (a `reminders` entry that is not an
+object, a missing or non-object `channels` map, a channel state without a
+recognised `status`, a `digests` entry that is not an object), the
+scheduler stops and sends **nothing**. Such a record cannot answer "did
+this already go out?", and assuming "no" would re-send every reminder.
+A *missing* state file is different: that is a normal first run and
+initialises an empty history.
+
+The state file is written with `fsync` — of the file **and** of the
+directory entry, so the rename is durable too. A failed flush (full disk,
+I/O error) stops the scheduler before it sends: a record that never
+reached the platter is not a record. Only "this platform cannot fsync a
+directory" (`EINVAL`/`ENOTSUP` — some filesystems) is tolerated; that is
+a missing capability, not a failed flush.
+
+**Recovering a corrupt state file — in this order, do not skip step 1:**
+
+```bash
+# 1) stop the scheduler first — it must not send while the state is broken
+sudo systemctl stop y8y-todo-notify.timer
+
+# 2) back the file up (never delete it in place)
+sudo cp /var/lib/y8y-todo/notify/notification_state.json \
+        /var/lib/y8y-todo/notify/notification_state.json.broken
+
+# 3) repair it — restore from a backup, or fix the JSON by hand.
+#    Verify it parses before going on:
+python3 -m json.tool /var/lib/y8y-todo/notify/notification_state.json > /dev/null
+
+# 4) only then let the scheduler deliver again
+sudo systemctl start y8y-todo-notify.timer
+```
+
+⚠ **Do not simply move the state file aside and let the scheduler rebuild
+it.** That discards the entire dedup history: every reminder that already
+went out will be sent again. Stop the timer, back the file up, repair or
+reconcile it, and only then resume delivery.
+
 #### 5.2.5 Process hardening (defense in depth, not the boundary)
 
 `src/procguard.py` performs an in-process hardening, and `notify_runner.py`

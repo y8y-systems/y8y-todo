@@ -11,8 +11,10 @@
 
 全部数据都是虚构的, LINE 渠道是**模拟**的 (不发网络请求, 不碰真实凭据)。
 """
+import errno
 import json
 import os
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -25,12 +27,14 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import notify_runner                                                  # noqa: E402
+import taskstore                                                      # noqa: E402
 from notifications import (                                            # noqa: E402
     IN_FLIGHT_STATUS,
     LOCK_FILE,
     DeliveryLock,
     LineProvider,
     NotificationStateCorrupt,
+    NotificationStateError,
     NotifyConfig,
     ProviderError,
     Scheduler,
@@ -148,6 +152,11 @@ def _digest_state(data_dir):
     raw = json.loads(_state_file(data_dir).read_text(encoding='utf-8'))
     key = next(iter(raw['digests']))
     return raw['digests'][key]
+
+
+#: 提醒事件的判重键 —— 与 scan_tasks 生成的 occurrence key 同构。
+KEY = 'kara|shared|todo/a.md|2026-10-01|2026-10-27T09:00'
+STAMP = '2026-10-27T00:00:00+00:00'
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -510,3 +519,263 @@ def test_a_dry_run_neither_writes_the_state_nor_takes_the_lock(tmp_path):
     assert report['planned']
     assert not _state_file(data).exists()
     assert not (Path(notify_state_dir(data)) / LOCK_FILE).exists()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 5. 记录内部损坏 → fail closed
+#
+# reminder() / channel_state() / digest_state() 对类型不对的记录一律返回
+# None, 而 None 的含义是"没发过" —— 放过就等于重新投递一遍。所以读盘
+# 时就必须把结构问题挑出来 fail closed。
+# ══════════════════════════════════════════════════════════════════════
+
+def _write_state(data_dir, state):
+    path = _state_file(data_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False), encoding='utf-8')
+    return path
+
+
+def _assert_fail_closed(data_dir, state):
+    """坏掉的状态 → 抛错 + Provider 一次都没被调用。
+
+    顺带放一个**本该被通知**的共享任务: 证明"坏记录"会让**整个调度**
+    停下来, 而不是只跳过那一条。
+    """
+    _write_task(data_dir, 'todo', 'a.md', title='开会', due=TODAY,
+                due_time='09:00', owner='shared')
+    _write_state(data_dir, state)
+    provider = FakeLineProvider()
+    with pytest.raises(NotificationStateCorrupt):
+        _scheduler(data_dir, provider, _at(8, 30),
+                   settings={'kara': _kara()}).run()
+    assert provider.calls == 0
+    assert provider.sent == []
+
+
+def test_a_reminder_record_that_is_not_an_object_stops_every_delivery(tmp_path):
+    """reminders[key] 类型错 → 不能被 reminder() 静默转成 None。"""
+    _assert_fail_closed(tmp_path / 'data', {
+        'version': 1,
+        'reminders': {KEY: '这不是对象'},
+        'digests': {},
+    })
+
+
+def test_a_reminder_record_without_a_channels_object_stops_every_delivery(tmp_path):
+    """reminders[key].channels 缺失/类型错 → 判重依据不可信。"""
+    _assert_fail_closed(tmp_path / 'data', {
+        'version': 1,
+        'reminders': {KEY: {'updated_at': STAMP}},
+        'digests': {},
+    })
+
+
+def test_a_channel_record_that_is_not_an_object_stops_every_delivery(tmp_path):
+    """channels[line] 类型错 → 不能被 channel_state() 静默转成 None。"""
+    _assert_fail_closed(tmp_path / 'data', {
+        'version': 1,
+        'reminders': {KEY: {'channels': {'line': '已发送?'}, 'updated_at': STAMP}},
+        'digests': {},
+    })
+
+
+def test_a_channel_record_without_a_status_stops_every_delivery(tmp_path):
+    """channels[line] 缺 status → 没法判断发没发过 → 停发。"""
+    _assert_fail_closed(tmp_path / 'data', {
+        'version': 1,
+        'reminders': {KEY: {'channels': {'line': {'attempts': 1}}, 'updated_at': STAMP}},
+        'digests': {},
+    })
+
+
+def test_a_channel_record_with_an_unknown_status_stops_every_delivery(tmp_path):
+    """channels[line].status 是没见过的值 → 同样是判重依据不可信。"""
+    _assert_fail_closed(tmp_path / 'data', {
+        'version': 1,
+        'reminders': {KEY: {'channels': {'line': {'status': 'pending'}},
+                            'updated_at': STAMP}},
+        'digests': {},
+    })
+
+
+def test_a_digest_record_that_is_not_an_object_stops_every_delivery(tmp_path):
+    """digests[key] 类型错 → 不能被 digest_state() 静默转成 None。"""
+    _assert_fail_closed(tmp_path / 'data', {
+        'version': 1,
+        'reminders': {},
+        'digests': {'kara|2026-10-27|line': ['sent']},
+    })
+
+
+def test_a_digest_record_without_a_known_status_stops_every_delivery(tmp_path):
+    """digests[key] 缺 status / status 未知 → 停发。"""
+    _assert_fail_closed(tmp_path / 'data', {
+        'version': 1,
+        'reminders': {},
+        'digests': {'kara|2026-10-27|line': {'at': STAMP}},
+    })
+
+
+def test_a_corrupt_record_for_another_key_still_stops_every_delivery(tmp_path):
+    """任何一条记录坏了 → 整体停发 (不只是那一条)。"""
+    _assert_fail_closed(tmp_path / 'data', {
+        'version': 1,
+        'reminders': {'bridge|shared|todo/x.md|2026-10-01|2026-10-27T09:00': 42},
+        'digests': {},
+    })
+
+
+def test_a_state_file_with_every_known_status_still_loads(tmp_path):
+    """历史兼容: 各版本写出来的状态都还能正常读, 不误报损坏。"""
+    data = tmp_path / 'data'
+    _write_task(data, 'todo', 'a.md', title='开会', due=TODAY,
+                due_time='09:00', owner='shared')
+    _write_state(data, {
+        'version': 1,
+        'reminders': {
+            'kara|shared|todo/old.md|2026-10-01|2026-10-20T09:00': {
+                'channels': {'line': {'status': 'sent', 'at': STAMP, 'attempts': 1}},
+                'updated_at': STAMP,
+            },
+            'kara|shared|todo/old2.md|2026-10-01|2026-10-20T10:00': {
+                'channels': {'line': {'status': 'failed', 'at': STAMP, 'attempts': 1}},
+                'updated_at': STAMP,
+            },
+            'kara|shared|todo/old3.md|2026-10-01|2026-10-20T11:00': {
+                'channels': {'line': {'status': 'exhausted', 'at': STAMP, 'attempts': 1}},
+                'updated_at': STAMP,
+            },
+            'kara|shared|todo/old4.md|2026-10-01|2026-10-20T12:00': {
+                'channels': {'line': {'status': IN_FLIGHT_STATUS, 'at': STAMP,
+                                      'attempts': 1}},
+                'updated_at': STAMP,
+            },
+        },
+        'digests': {
+            'kara|2026-10-20|line': {'status': 'missed', 'at': STAMP},
+            'kara|2026-10-21|line': {'status': 'sent', 'at': STAMP, 'attempts': 1},
+        },
+    })
+
+    provider = FakeLineProvider()
+    report = _scheduler(data, provider, _at(8, 30),
+                        settings={'kara': _kara()}).run()
+    # 读得进去 → 正常投递; 旧记录不重发
+    assert len(provider.sent) == 1
+    assert report['sent'][0]['kind'] == 'reminder'
+
+
+def test_a_sent_record_for_the_same_key_prevents_a_resend(tmp_path):
+    """同一条判重键上已有终态 → 不重发 (历史文件同样生效)。"""
+    data = tmp_path / 'data'
+    _write_task(data, 'todo', 'a.md', title='开会', due=TODAY,
+                due_time='09:00', owner='shared')
+    _write_state(data, {
+        'version': 1,
+        'reminders': {KEY: {'channels': {'line': {'status': 'sent', 'at': STAMP,
+                                                'attempts': 1}},
+                            'updated_at': STAMP}},
+        'digests': {},
+    })
+    provider = FakeLineProvider()
+    _scheduler(data, provider, _at(8, 30), settings={'kara': _kara()}).run()
+    assert provider.calls == 0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 6. 刷盘失败 → 阻止发送 (Linux 生产环境)
+# ══════════════════════════════════════════════════════════════════════
+
+def _fsync_failing(predicate, err=errno.EIO):
+    """造一个只在满足条件时抛错的 ``os.fsync``。
+
+    注意: ``taskstore.os`` 就是全局的 ``os`` 模块, 所以这里改的是
+    进程级的 ``os.fsync`` —— monkeypatch 会在用例结束后还原。
+    """
+    real = os.fsync
+
+    def fake(fd):
+        if predicate(fd):
+            raise OSError(err, '模拟刷盘失败')
+        return real(fd)
+    return fake
+
+
+def _is_dir_fd(fd):
+    return stat.S_ISDIR(os.fstat(fd).st_mode)
+
+
+def test_a_failed_file_flush_stops_the_delivery(tmp_path, monkeypatch):
+    """文件刷盘失败 → 记不下来就不能发 → 零投递。"""
+    data = tmp_path / 'data'
+    _write_task(data, 'todo', 'a.md', title='开会', due=TODAY,
+                due_time='09:00', owner='shared')
+    monkeypatch.setattr(taskstore.os, 'fsync', _fsync_failing(lambda fd: True))
+
+    provider = FakeLineProvider()
+    with pytest.raises(NotificationStateError):
+        _scheduler(data, provider, _at(8, 30), settings={'kara': _kara()}).run()
+    assert provider.calls == 0
+    assert provider.sent == []
+
+
+def test_a_failed_directory_flush_stops_the_delivery(tmp_path, monkeypatch):
+    """目录刷盘失败 (EIO) → 不能被静默当成写成功 → 零投递。
+
+    这是 Linux 生产环境的真实故障模式: 文件写下去了, 但重命名没有
+    落盘。放过去 = 掉电后判重记录消失 = 同一条 LINE 消息发两遍。
+    """
+    data = tmp_path / 'data'
+    _write_task(data, 'todo', 'a.md', title='开会', due=TODAY,
+                due_time='09:00', owner='shared')
+    monkeypatch.setattr(taskstore.os, 'fsync', _fsync_failing(_is_dir_fd))
+
+    provider = FakeLineProvider()
+    with pytest.raises(NotificationStateError):
+        _scheduler(data, provider, _at(8, 30), settings={'kara': _kara()}).run()
+    assert provider.calls == 0
+    assert provider.sent == []
+
+
+def test_an_unsupported_directory_flush_is_tolerated(tmp_path, monkeypatch):
+    """平台不支持对目录刷盘 (EINVAL) → 能力缺失, 不是失败 → 不阻断。
+
+    macOS/部分文件系统会这么干; 这种情况下放过去是安全的: 文件内容
+    本身已经 fsync 过了。
+    """
+    data = tmp_path / 'data'
+    _write_task(data, 'todo', 'a.md', title='开会', due=TODAY,
+                due_time='09:00', owner='shared')
+    monkeypatch.setattr(taskstore.os, 'fsync',
+                        _fsync_failing(_is_dir_fd, err=errno.EINVAL))
+
+    provider = FakeLineProvider()
+    _scheduler(data, provider, _at(8, 30), settings={'kara': _kara()}).run()
+    assert len(provider.sent) == 1
+
+
+def test_a_failed_flush_leaves_the_previous_state_file_intact(tmp_path, monkeypatch):
+    """刷盘失败时不能把状态文件写成半截 (原子写 + 旧内容保留)。"""
+    data = tmp_path / 'data'
+    _write_task(data, 'todo', 'a.md', title='开会', due=TODAY,
+                due_time='09:00', owner='shared')
+    _write_state(data, {
+        'version': 1,
+        'reminders': {},
+        'digests': {},
+    })
+    before = _state_file(data).read_text(encoding='utf-8')
+    monkeypatch.setattr(taskstore.os, 'fsync', _fsync_failing(lambda fd: True))
+
+    provider = FakeLineProvider()
+    with pytest.raises(NotificationStateError):
+        _scheduler(data, provider, _at(8, 30), settings={'kara': _kara()}).run()
+    assert provider.calls == 0
+    # 旧状态文件还是原来那份 (没被半截内容覆盖)
+    assert _state_file(data).read_text(encoding='utf-8') == before
+    # 目录里也没留下临时文件
+    leftovers = [p.name for p in Path(notify_state_dir(data)).iterdir()
+                 if p.name.endswith('.tmp')]
+    assert not leftovers, f'留下了临时文件: {leftovers}'
+

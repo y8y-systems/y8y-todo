@@ -466,12 +466,14 @@ sudo python3 -c "import json;d=json.load(open('$DATA/notify/notification_state.j
 print([s for v in d['reminders'].values() for s in v['channels'].values() if s['status']=='sending'])"
 
 # (b) 状态文件损坏 → 调度器整体停发 (fail closed), 退出码非 0, 一条都不发
+sudo systemctl stop y8y-todo-notify.timer          # 先停调度器
 sudo cp $DATA/notify/notification_state.json /tmp/state.bak
 echo '{ broken' | sudo tee $DATA/notify/notification_state.json >/dev/null
 sudo systemctl start y8y-todo-notify.service
 sudo journalctl -u y8y-todo-notify.service --no-pager | tail -5
 #    → 报错说明"通知投递状态文件损坏", 且没有任何新投递
 sudo cp /tmp/state.bak $DATA/notify/notification_state.json
+sudo systemctl start y8y-todo-notify.timer
 
 # (c) 并发: 两个调度进程撞在一起 → 抢不到锁的那一轮整轮跳过
 sudo systemctl start y8y-todo-notify.service &
@@ -483,6 +485,16 @@ sudo systemctl start y8y-todo-notify.service
 (b) with a corrupt state file the scheduler sends nothing and exits non-zero,
 and it works again once the file is restored; (c) two concurrent runs never
 produce a duplicate delivery — the loser skips the round explicitly.
+
+**Recovery note:** repairing a corrupt state file means *stop the timer →
+back the file up → repair it → start the timer again*. Do **not** simply
+move the state file aside and let the scheduler rebuild it — that discards
+the dedup history and re-sends everything that already went out
+(`docs/deployment.md` §5.2).
+
+A persistence failure is fail-closed the same way: the state file is
+written with `fsync`, so a full disk or an I/O error makes the scheduler
+stop **before** it sends, with `状态落盘失败` in the journal.
 
 ### 9.4 Credential isolation and permissions (operator acceptance)
 
