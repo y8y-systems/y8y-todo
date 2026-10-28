@@ -138,7 +138,8 @@ def test_default_settings_are_off():
     assert s['enabled'] is False
     assert s['channels'] == []
     assert s['daily_digest'] is False
-    assert s['digest_time'] == '08:00'
+    assert s['digest_time'] == '06:00'       # 业务口径: 每天 06:00 一条摘要
+    assert s['lead_minutes'] == 30           # 业务口径: 事件提前 30 分钟提醒
 
 
 def test_normalize_settings_accepts_valid_input():
@@ -338,7 +339,7 @@ def test_chunk_text_splits_long_bodies():
 def test_timed_task_reminder_is_sent_at_due_minus_lead(tmp_path):
     data = tmp_path / 'data'
     _write_task(data, 'todo', 'a.md', title='开会', due='2026-10-27',
-                due_time='09:00', owner='alice')
+                due_time='09:00', owner='shared')
     provider = FakeProvider()
 
     # 提前 30 分钟 → 08:30 起可发
@@ -363,11 +364,12 @@ def test_timed_task_reminder_is_sent_at_due_minus_lead(tmp_path):
 def test_all_day_task_is_not_point_reminded(tmp_path):
     """没有时间的任务只进每日摘要, 不走单点提醒。"""
     data = tmp_path / 'data'
-    _write_task(data, 'todo', 'a.md', title='买牛奶', due='2026-10-27', owner='alice')
+    _write_task(data, 'todo', 'a.md', title='买牛奶', due='2026-10-27', owner='shared')
     provider = FakeProvider()
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 12, 0, tzinfo=TZ),
-                            settings={'alice': _enabled(daily_digest=True)})
+                            now=datetime(2026, 10, 27, 6, 0, tzinfo=TZ),
+                            settings={'alice': _enabled(daily_digest=True,
+                                                        digest_time='06:00')})
     report = sched.run()
     # 单点提醒没有发 (只有摘要)
     assert [item for item in report['sent'] if item['kind'] == 'reminder'] == []
@@ -376,35 +378,39 @@ def test_all_day_task_is_not_point_reminded(tmp_path):
     assert '买牛奶' in provider.sent[0][1].body
 
 
-def test_daily_digest_lists_today_and_overdue(tmp_path):
+def test_daily_digest_lists_today_tasks_only(tmp_path):
+    """摘要只讲**今天**的事 —— 昨天的不补进来, 明天的也不提前讲。"""
     data = tmp_path / 'data'
-    _write_task(data, 'todo', 'a.md', title='今天的任务', due='2026-10-27', owner='alice')
-    _write_task(data, 'todo', 'b.md', title='昨天的任务', due='2026-10-26', owner='alice')
-    _write_task(data, 'todo', 'c.md', title='明天的任务', due='2026-10-28', owner='alice')
+    _write_task(data, 'todo', 'a.md', title='今天的任务', due='2026-10-27', owner='shared')
+    _write_task(data, 'todo', 'b.md', title='昨天的任务', due='2026-10-26', owner='shared')
+    _write_task(data, 'todo', 'c.md', title='明天的任务', due='2026-10-28', owner='shared')
     provider = FakeProvider()
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
-                            settings={'alice': _enabled(daily_digest=True)})
+                            now=datetime(2026, 10, 27, 6, 0, tzinfo=TZ),
+                            settings={'alice': _enabled(daily_digest=True,
+                                                        digest_time='06:00')})
     sched.run()
     body = provider.sent[0][1].body
     assert '今天的任务' in body
-    assert '昨天的任务' in body
+    assert '昨天的任务' not in body
     assert '明天的任务' not in body
 
 
 def test_digest_is_not_sent_before_digest_time(tmp_path):
     data = tmp_path / 'data'
-    _write_task(data, 'todo', 'a.md', title='今天的任务', due='2026-10-27', owner='alice')
+    _write_task(data, 'todo', 'a.md', title='今天的任务', due='2026-10-27', owner='shared')
     provider = FakeProvider()
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 7, 59, tzinfo=TZ),
-                            settings={'alice': _enabled(daily_digest=True, digest_time='08:00')})
+                            now=datetime(2026, 10, 27, 5, 59, tzinfo=TZ),
+                            settings={'alice': _enabled(daily_digest=True,
+                                                        digest_time='06:00')})
     sched.run()
     assert provider.sent == []
 
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 8, 0, tzinfo=TZ),
-                            settings={'alice': _enabled(daily_digest=True, digest_time='08:00')})
+                            now=datetime(2026, 10, 27, 6, 0, tzinfo=TZ),
+                            settings={'alice': _enabled(daily_digest=True,
+                                                        digest_time='06:00')})
     sched.run()
     assert len(provider.sent) == 1
 
@@ -413,8 +419,9 @@ def test_digest_not_sent_when_nothing_to_say(tmp_path):
     data = tmp_path / 'data'
     provider = FakeProvider()
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
-                            settings={'alice': _enabled(daily_digest=True)})
+                            now=datetime(2026, 10, 27, 6, 0, tzinfo=TZ),
+                            settings={'alice': _enabled(daily_digest=True,
+                                                        digest_time='06:00')})
     sched.run()
     assert provider.sent == []
 
@@ -426,65 +433,56 @@ def test_digest_not_sent_when_nothing_to_say(tmp_path):
 def test_same_occurrence_is_not_sent_twice(tmp_path):
     data = tmp_path / 'data'
     _write_task(data, 'todo', 'a.md', title='开会', due='2026-10-27',
-                due_time='09:00', owner='alice')
+                due_time='09:00', owner='shared')
     provider = FakeProvider()
     for _ in range(3):
         sched = _make_scheduler(data, {'fake': provider},
                                 now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
-                                settings={'alice': _enabled()})
+                                settings={'alice': _enabled(lead_minutes=0)})
         sched.run()
     assert len(provider.sent) == 1
 
 
-def test_failed_send_is_retried_then_marked_sent(tmp_path):
+def test_failed_send_is_not_retried(tmp_path):
+    """at-most-once: 发送失败就是终态 —— 不重试, 不补发。
+
+    代价是明确的: 偶发网络故障会丢掉这一条通知, 而不是延迟之后补上。
+    """
     data = tmp_path / 'data'
     _write_task(data, 'todo', 'a.md', title='开会', due='2026-10-27',
-                due_time='09:00', owner='alice')
+                due_time='09:00', owner='shared')
     provider = FakeProvider(fail_times=1)
     sched = _make_scheduler(data, {'fake': provider},
                             now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
-                            settings={'alice': _enabled()})
+                            settings={'alice': _enabled(lead_minutes=0)})
     report = sched.run()
     assert report['sent'] == []
     assert report['failed'][0]['status'] == 'failed'
 
-    # 退避期内不再重试
+    # 下一轮 (还在同一个窗口里) 也**不会**再打一次接口
     provider.fail_times = 0
     sched = _make_scheduler(data, {'fake': provider},
                             now=datetime(2026, 10, 27, 9, 1, tzinfo=TZ),
-                            settings={'alice': _enabled()})
+                            settings={'alice': _enabled(lead_minutes=0)})
     assert sched.run()['sent'] == []
-
-    # 退避期之后重试成功 → 只发一次, 且状态变成 sent
-    sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 9, 30, tzinfo=TZ),
-                            settings={'alice': _enabled()})
-    report = sched.run()
-    assert len(report['sent']) == 1
-    assert len(provider.sent) == 1
-
-    # 成功之后不再重发
-    sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 10, 0, tzinfo=TZ),
-                            settings={'alice': _enabled()})
-    assert sched.run()['sent'] == []
-    assert len(provider.sent) == 1
+    assert sched.run()['failed'] == []
+    assert provider.sent == []
 
 
 def test_non_retryable_failure_is_not_retried(tmp_path):
     data = tmp_path / 'data'
     _write_task(data, 'todo', 'a.md', title='开会', due='2026-10-27',
-                due_time='09:00', owner='alice')
+                due_time='09:00', owner='shared')
     provider = FakeProvider(fail_times=5, error=ProviderError('凭据无效', retryable=False))
     sched = _make_scheduler(data, {'fake': provider},
                             now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
-                            settings={'alice': _enabled()})
+                            settings={'alice': _enabled(lead_minutes=0)})
     report = sched.run()
     assert report['failed'][0]['status'] == 'exhausted'
 
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 12, 0, tzinfo=TZ),
-                            settings={'alice': _enabled()})
+                            now=datetime(2026, 10, 27, 9, 5, tzinfo=TZ),
+                            settings={'alice': _enabled(lead_minutes=0)})
     assert sched.run()['failed'] == []      # 放弃了, 不再打接口
 
 
@@ -492,11 +490,11 @@ def test_failed_state_is_persisted_across_processes(tmp_path):
     """状态存在磁盘上 —— 调度器重启后不会把失败的通知当成"没发过"。"""
     data = tmp_path / 'data'
     _write_task(data, 'todo', 'a.md', title='开会', due='2026-10-27',
-                due_time='09:00', owner='alice')
+                due_time='09:00', owner='shared')
     provider = FakeProvider(fail_times=1)
     sched = _make_scheduler(data, {'fake': provider},
                             now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
-                            settings={'alice': _enabled()})
+                            settings={'alice': _enabled(lead_minutes=0)})
     sched.run()
 
     state = json.loads(
@@ -504,18 +502,19 @@ def test_failed_state_is_persisted_across_processes(tmp_path):
     entry = list(state['reminders'].values())[0]
     assert entry['channels']['fake']['status'] == 'failed'
     assert entry['channels']['fake']['attempts'] == 1
-    assert entry['channels']['fake']['next_attempt_at']
+    # 没有"下次重试时间" —— 这条通知不会再试了
+    assert not entry['channels']['fake'].get('next_attempt_at')
 
 
 def test_state_prunes_stale_entries(tmp_path):
     """过期记录会被清理 (默认保留 30 天 —— 任务"复活"时不重复提醒)。"""
     data = tmp_path / 'data'
     _write_task(data, 'todo', 'a.md', title='开会', due='2026-10-27',
-                due_time='09:00', owner='alice')
+                due_time='09:00', owner='shared')
     provider = FakeProvider()
     sched = _make_scheduler(data, {'fake': provider},
                             now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
-                            settings={'alice': _enabled()})
+                            settings={'alice': _enabled(lead_minutes=0)})
     sched.run()
     state_file = data / 'notify' / 'notification_state.json'
     assert json.loads(state_file.read_text(encoding='utf-8'))['reminders']
@@ -524,7 +523,7 @@ def test_state_prunes_stale_entries(tmp_path):
     os.remove(data / 'todo' / 'a.md')
     sched = _make_scheduler(data, {'fake': provider},
                             now=datetime(2026, 10, 27, 9, 5, tzinfo=TZ),
-                            settings={'alice': _enabled()})
+                            settings={'alice': _enabled(lead_minutes=0)})
     sched.run()
     assert json.loads(state_file.read_text(encoding='utf-8'))['reminders']
 
@@ -537,7 +536,7 @@ def test_state_prunes_stale_entries(tmp_path):
 
     sched = _make_scheduler(data, {'fake': provider},
                             now=datetime(2026, 10, 27, 9, 10, tzinfo=TZ),
-                            settings={'alice': _enabled()})
+                            settings={'alice': _enabled(lead_minutes=0)})
     sched.run()
     assert json.loads(state_file.read_text(encoding='utf-8'))['reminders'] == {}
 
@@ -546,22 +545,57 @@ def test_state_prunes_stale_entries(tmp_path):
 # 7. 归属与共享任务权限
 # ══════════════════════════════════════════════════════════════════════
 
-def test_private_task_never_leaks_to_other_users(tmp_path):
+def test_private_task_is_never_notified(tmp_path):
+    """通知范围 ≠ 可见范围: 私人任务谁都不发 (连本人自己也不发)。"""
     data = tmp_path / 'data'
     _write_task(data, 'todo', 'a.md', title='alice的私人任务', due='2026-10-27',
                 due_time='09:00', owner='alice')
     provider = FakeProvider()
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
+                            now=datetime(2026, 10, 27, 8, 30, tzinfo=TZ),
                             settings={'alice': _enabled(), 'bob': _enabled()})
     sched.run()
-    recipients = {user for user, _msg in provider.sent}
-    assert recipients == {'alice'}
-    assert 'alice的私人任务' in provider.sent[0][1].body
-    # bob 的投递里绝不能出现 alice 的私人任务
-    for user, message in provider.sent:
-        if user == 'bob':
-            assert 'alice的私人任务' not in message.body
+    assert provider.sent == []
+    for _user, message in provider.sent:
+        assert 'alice的私人任务' not in message.body
+
+
+def test_private_task_never_leaks_to_other_users(tmp_path):
+    """别人的私人任务永远不会出现在任何人的通知里 (含 shared 范围)。"""
+    data = tmp_path / 'data'
+    _write_task(data, 'todo', 'a.md', title='alice的私人任务', due='2026-10-27',
+                due_time='09:00', owner='alice')
+    _write_task(data, 'todo', 'b.md', title='共享任务', due='2026-10-27',
+                due_time='09:00', owner='shared')
+    provider = FakeProvider()
+    sched = _make_scheduler(data, {'fake': provider},
+                            now=datetime(2026, 10, 27, 8, 30, tzinfo=TZ),
+                            settings={'alice': _enabled(), 'bob': _enabled()})
+    sched.run()
+    recipients = sorted({user for user, _msg in provider.sent})
+    assert recipients == ['alice', 'bob']
+    for _user, message in provider.sent:
+        assert 'alice的私人任务' not in message.body
+        assert '共享任务' in message.body
+
+
+def test_own_and_shared_scope_keeps_the_v1_behaviour(tmp_path):
+    """显式退回 V1 范围时, 本人的任务也进通知 (默认不是这样)。"""
+    data = tmp_path / 'data'
+    _write_task(data, 'todo', 'a.md', title='共享任务', due='2026-10-27',
+                due_time='09:00', owner='shared')
+    _write_task(data, 'todo', 'b.md', title='alice的私人任务', due='2026-10-27',
+                due_time='09:00', owner='alice')
+    provider = FakeProvider()
+    sched = _make_scheduler(data, {'fake': provider},
+                            now=datetime(2026, 10, 27, 8, 30, tzinfo=TZ),
+                            settings={'alice': _enabled(), 'bob': _enabled()},
+                            Y8Y_NOTIFY_TASK_SCOPE='own_and_shared')
+    sched.run()
+    bodies = {user: message.body for user, message in provider.sent}
+    assert 'alice的私人任务' in bodies['alice']
+    assert 'alice的私人任务' not in bodies['bob']
+    assert '共享任务' in bodies['bob']
 
 
 def test_shared_task_is_visible_to_every_enabled_user(tmp_path):
@@ -570,11 +604,26 @@ def test_shared_task_is_visible_to_every_enabled_user(tmp_path):
                 due_time='09:00', owner='shared')
     provider = FakeProvider()
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
+                            now=datetime(2026, 10, 27, 8, 30, tzinfo=TZ),
                             settings={'alice': _enabled(), 'bob': _enabled()})
     sched.run()
     recipients = sorted({user for user, _msg in provider.sent})
     assert recipients == ['alice', 'bob']
+
+
+def test_recipient_allowlist_limits_who_receives(tmp_path):
+    """灰度: 收件人白名单之外的已启用用户收不到任何通知。"""
+    data = tmp_path / 'data'
+    _write_task(data, 'todo', 'a.md', title='共享任务', due='2026-10-27',
+                due_time='09:00', owner='shared')
+    provider = FakeProvider()
+    sched = _make_scheduler(data, {'fake': provider},
+                            now=datetime(2026, 10, 27, 8, 30, tzinfo=TZ),
+                            settings={'alice': _enabled(), 'bob': _enabled()},
+                            Y8Y_NOTIFY_RECIPIENTS='alice')
+    sched.run()
+    recipients = sorted({user for user, _msg in provider.sent})
+    assert recipients == ['alice']
 
 
 def test_disabled_user_gets_nothing(tmp_path):
@@ -583,7 +632,7 @@ def test_disabled_user_gets_nothing(tmp_path):
                 due_time='09:00', owner='shared')
     provider = FakeProvider()
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
+                            now=datetime(2026, 10, 27, 8, 30, tzinfo=TZ),
                             settings={'alice': _enabled()})
     sched.run()
     recipients = {user for user, _msg in provider.sent}
@@ -591,14 +640,18 @@ def test_disabled_user_gets_nothing(tmp_path):
 
 
 def test_legacy_task_without_owner_follows_default_owner(tmp_path):
-    """旧数据没有 owner 字段 → 与 Web 端一致地归给第一个配置用户。"""
+    """旧数据没有 owner 字段 → 与 Web 端一致地归给第一个配置用户。
+
+    (范围用 V1 的 own_and_shared, 因为默认范围只看共享任务。)
+    """
     data = tmp_path / 'data'
     path = os.path.join(str(data), 'todo', 'legacy.md')
     atomic_write(path, '---\ntitle: 旧任务\ndue: 2026-10-27\ndue_time: 09:00\n---\n\n正文\n')
     provider = FakeProvider()
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
-                            settings={'alice': _enabled(), 'bob': _enabled()})
+                            now=datetime(2026, 10, 27, 8, 30, tzinfo=TZ),
+                            settings={'alice': _enabled(), 'bob': _enabled()},
+                            Y8Y_NOTIFY_TASK_SCOPE='own_and_shared')
     sched.run()
     recipients = {user for user, _msg in provider.sent}
     assert recipients == {'alice'}      # default_owner = alice
@@ -650,33 +703,34 @@ def test_user_without_channels_is_skipped(tmp_path):
     assert report['skipped']
 
 
-def test_catchup_window_bounds_late_reminders(tmp_path):
-    """过期的任务不无限补发。"""
+def test_window_bounds_late_reminders(tmp_path):
+    """错过触发窗口 → 不补发 (只有窗口内的延迟可以接受)。"""
     data = tmp_path / 'data'
     _write_task(data, 'todo', 'a.md', title='开会', due='2026-10-27',
-                due_time='09:00', owner='alice')
+                due_time='09:00', owner='shared')
     provider = FakeProvider()
+
+    # 窗口外 (晚了一整天) → 不发
     sched = _make_scheduler(data, {'fake': provider},
                             now=datetime(2026, 10, 29, 9, 0, tzinfo=TZ),
-                            settings={'alice': _enabled()},
-                            Y8Y_NOTIFY_CATCHUP_HOURS='24')
+                            settings={'alice': _enabled(lead_minutes=30)})
     assert sched.run()['sent'] == []
 
+    # 窗口内 (目标时刻 + 1 分钟) → 发
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 23, 0, tzinfo=TZ),
-                            settings={'alice': _enabled()},
-                            Y8Y_NOTIFY_CATCHUP_HOURS='24')
+                            now=datetime(2026, 10, 27, 8, 31, tzinfo=TZ),
+                            settings={'alice': _enabled(lead_minutes=30)})
     assert len(sched.run()['sent']) == 1
 
 
 def test_dry_run_does_not_send_or_write(tmp_path):
     data = tmp_path / 'data'
     _write_task(data, 'todo', 'a.md', title='开会', due='2026-10-27',
-                due_time='09:00', owner='alice')
+                due_time='09:00', owner='shared')
     provider = FakeProvider()
     sched = _make_scheduler(data, {'fake': provider},
-                            now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
-                            settings={'alice': _enabled()})
+                            now=datetime(2026, 10, 27, 8, 30, tzinfo=TZ),
+                            settings={'alice': _enabled(lead_minutes=30)})
     report = sched.run(dry_run=True)
     assert provider.sent == []
     assert report['planned']

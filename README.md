@@ -112,7 +112,9 @@ the Web process never holds a LINE token or an API key:
 | `Y8Y_NOTIFY_EMAIL_API_KEY` | *(empty)* | Resend API key |
 | `Y8Y_NOTIFY_EMAIL_FROM` | *(empty)* | verified sender address |
 | `Y8Y_NOTIFY_EMAIL_TARGETS` | *(empty)* | `user=mail@example.com,...` — overrides the `Y8Y_USERS` address |
-| `Y8Y_NOTIFY_CATCHUP_HOURS` | `24` | how long after the due time a missed reminder may still be sent |
+| `Y8Y_NOTIFY_TASK_SCOPE` | `shared` | which tasks may be announced: `shared` (shared tasks only) or `own_and_shared` (own + shared, the V1 behaviour) |
+| `Y8Y_NOTIFY_RECIPIENTS` | *(empty)* | `user,...` — allow-list of recipients; empty means "everyone who enabled notifications and has a target" |
+| `Y8Y_NOTIFY_WINDOW_MINUTES` | `10` | grace window after the target moment; beyond it the notification is **missed, not sent late** |
 | `Y8Y_NOTIFY_RETENTION_DAYS` | `30` | how long delivery state is kept before it is pruned |
 | `Y8Y_NOTIFY_TIMEOUT` | `15` | per-request timeout (seconds) when calling the provider API |
 | `Y8Y_NOTIFY_KEEP_DUMPABLE` | *(off)* | debug only — keep the scheduler dumpable (core dumps / `gdb`); normally it hardens itself so a same-UID process cannot read its environment |
@@ -201,15 +203,30 @@ src/taskstore.py    shared task-file parsing (web + engine, one implementation)
 
 ### What gets sent
 
+**Notification scope is narrower than visibility scope.** The web app shows
+a user their own tasks *plus* the shared ones (`taskstore.can_access`),
+but the notifier only ever announces **shared** tasks (`owner: shared`).
+Nobody's private task — not even its own owner's — is ever put into a
+digest or a reminder. The scope is selected with `Y8Y_NOTIFY_TASK_SCOPE`
+(`shared` by default, `own_and_shared` restores the older behaviour).
+
+A task is only considered when it is **not completed**, has a **valid due
+date**, and is in scope. Ordinary and recurring tasks are treated the same.
+
 | Task shape | Notification | When |
 | --- | --- | --- |
 | has `due` **and** `due_time` | single reminder | at `due_time` minus the user's *lead time* (default 30 min) |
-| all-day (no `due_time`) | part of the daily digest | once a day at the user's digest time (default 08:00) |
+| all-day (no `due_time`) | part of the daily digest | once a day at the user's digest time (default 06:00, Asia/Tokyo) |
 
-The daily digest contains the user's all-day tasks due today **plus**
-their overdue tasks. A task that has a clock time is never repeated in
-the digest, and an all-day task is never point-reminded — the two
-channels do not overlap.
+The daily digest contains **every** shared task due today — the ones with
+a clock time *and* the all-day ones — sorted by time, with the all-day
+tasks in their own section. It never contains overdue tasks: yesterday's
+leftovers do not come back the next morning. If nothing is due today, no
+digest is sent at all. At most one digest per day, and a digest missed
+because the scheduler was down is **not** sent later that day.
+
+The two channels are independent: an event that already showed up in the
+06:00 digest still gets its own 30-minutes-before reminder.
 
 Per user, under **Settings → Notifications** you can enable/disable
 notifications, pick the channels (LINE, email), set the lead time and
@@ -230,9 +247,11 @@ the digest time.
   directory, and nothing else: the scheduler may not write the task tree
   nor the machine-to-machine credential file. Both accounts can replace
   any file in the shared notification state directory.
-- Only tasks the recipient may see are ever considered: a task owned by
-  another user is never included in somebody else's digest or reminder,
-  and shared tasks are delivered once per entitled user.
+- Only tasks the recipient may see are ever considered — and the
+  notification scope is narrower still: **shared tasks only**
+  (`Y8Y_NOTIFY_TASK_SCOPE`). A private task of one user never reaches
+  another user's digest or reminder, and never reaches its own owner's
+  either. Shared tasks are delivered once per entitled user.
 - Messages are plain text (no HTML), so task titles cannot inject markup
   into a mail client or a LINE message.
 - The scheduler **hardens its own process** at startup
@@ -246,6 +265,9 @@ the digest time.
 
 ### Delivery guarantees
 
+Delivery is **at-most-once**. A message is either sent once or not sent
+at all; there is no retry, no catch-up and no second chance.
+
 - Each reminder is keyed by *occurrence* (`user|owner|file|created|due`),
   so changing a task's time produces a **new** reminder and the old
   state becomes irrelevant; a task that is completed, deleted or rolled
@@ -253,10 +275,20 @@ the digest time.
 - Delivery state is persisted, so a restart never re-sends a message
   that already went out, and a task that was completed and later
   restored is not reminded twice.
-- A failed delivery is retried with backoff (`5 · 2ⁿ` minutes, max 60,
-  at most 5 attempts). Permanent errors (4xx other than 408/425/429)
-  are not retried. A reminder that is missed by more than
-  `Y8Y_NOTIFY_CATCHUP_HOURS` is dropped instead of firing late.
+- A reminder fires only inside its window — from the target moment
+  (`due_time` minus the lead time) up to `Y8Y_NOTIFY_WINDOW_MINUTES`
+  later (default 10, enough to cover the 5-minute timer tick). Outside
+  that window the reminder is **dropped, never fired late**; the runner
+  reports it as `missed`.
+- The daily digest is likewise only sent near its digest time. If the
+  scheduler was down at 06:00, the digest is recorded as `missed` and
+  **not** re-sent later that day.
+- A failed delivery is a **final** outcome: it is recorded (with the
+  attempt count and the redacted error) as `failed` or `exhausted`, and
+  it is never retried. A transient network fault therefore means a lost
+  message — an accepted trade-off in exchange for never double-sending.
+- The systemd timer runs with `Persistent=false`, so a reboot does not
+  trigger a backlog of missed notifications.
 
 ### Install (server side)
 
@@ -315,8 +347,13 @@ resets notification preferences and history:
 | File | Contents |
 | --- | --- |
 | `notification_settings.json` | per-user preferences (channels, lead time, digest time) |
-| `notification_state.json` | delivery state — what was already sent, retry counters |
+| `notification_state.json` | delivery state — what was already sent, and how it ended |
 | `notification_channels.json` | credential-free capability table written by the scheduler |
+
+The scheduler also creates an empty `notification.lock` in the same
+directory: an `flock` file lock that keeps two scheduler processes from
+claiming the same notification at the same time. It holds no data and
+can be deleted while no scheduler is running.
 
 They live in their own directory (not in the data directory root) because
 the scheduler and the web app both need to write in there, and `atomic_write`
@@ -326,6 +363,41 @@ file. Giving the scheduler write access to the data directory root would
 therefore also let it replace `internal_tokens.json`, the machine-to-machine
 credential map. The dedicated directory keeps "both may write here, nowhere
 else" true.
+
+Delivery is **at-most-once**, and the state file is the only thing that
+makes that true:
+
+- every attempt is written to `notification_state.json` **before** the LINE
+  API is called, so a crash between "sent" and "recorded" leaves a
+  `sending` marker instead of an empty slot — the next round does not send
+  again (a lost message is preferred over a duplicate one);
+- a state file that cannot be read, is not valid JSON, or contains a
+  malformed **record** (a reminder whose `channels` entry has the wrong
+  type, a channel state with no `status`, a digest entry that is not an
+  object — anything that would make "did this already go out?" unanswerable)
+  **stops** the scheduler instead of being treated as an empty history
+  (which would re-send everything); a *missing* state file is a normal
+  first run;
+- the state file is written with `fsync` (file **and** directory entry). If
+  the flush fails — full disk, I/O error — the scheduler stops before
+  sending: a record that never reached the platter is not a record;
+- an `flock` on `notification.lock` serialises whole runs, so two timer
+  ticks can never claim the same notification.
+
+**Recovering a corrupt state file**: stop the timer, back the file up,
+repair it, then start the timer again — in that order.
+
+```bash
+sudo systemctl stop y8y-todo-notify.timer
+sudo cp /var/lib/y8y-todo/notify/notification_state.json \
+        /var/lib/y8y-todo/notify/notification_state.json.broken
+# repair the file, then: python3 -m json.tool <file> > /dev/null
+sudo systemctl start y8y-todo-notify.timer
+```
+
+Do **not** simply move the state file aside and let the scheduler rebuild
+it: that throws away the entire dedup history, and every reminder that
+already went out will be sent again.
 
 ## Backups, restore, upgrades
 
@@ -435,10 +507,11 @@ historical fields preserved), backup/restore hardening
 (verify-before-write, same-filesystem staging, rollback on mid-write
 failure, the public-proxy token boundary), the destructive-E2E safety
 guard, and security regressions (path traversal, static guard).
-The notification subsystem has its own suite (`tests/test_notifications.py`):
-channel providers, per-user settings, delivery state, retry/backoff,
-idempotency, and the permission boundary (a private task of one user
-must never reach another user's digest).
+The notification subsystem has its own suites (`tests/test_notifications.py`
+and `tests/test_notification_policy.py`): channel providers, per-user
+settings, delivery state, at-most-once semantics, idempotency, the
+shared-task scope (a private task must never reach any digest or
+reminder) and the digest/reminder window rules.
 A browser-level verification script (`tests/browser_verify.py`, needs
 `pip install playwright` and a running dev server) additionally checks
 XSS rendering, same-title creation and renaming through the real UI.

@@ -34,6 +34,7 @@ recurring:                      # list of "D" (1-31) or "MM-DD"
   - 20
 ---
 """
+import errno
 import json
 import os
 import re
@@ -63,7 +64,7 @@ def _tmp_path(path):
     return f'{path}.{os.getpid()}.{os.urandom(4).hex()}.tmp'
 
 
-def atomic_write(path, text):
+def atomic_write(path, text, fsync=False):
     """Write text to path atomically (tmp file + rename).
 
     A crash mid-write can never leave a half-written task or list file
@@ -77,6 +78,18 @@ def atomic_write(path, text):
     service accounts (the web app and the scheduler — see
     docs/deployment.md §5.2). The resulting permissions are unchanged:
     ``os.open`` applies the process umask exactly like ``open()`` did.
+
+    ``fsync=True`` additionally flushes the file (and the directory entry)
+    to stable storage before returning. It costs a few milliseconds, so it
+    is opt-in: the notification delivery state uses it because that file is
+    the *only* record of "this notification was already attempted" — losing
+    it to a power cut would mean sending the same LINE message twice.
+
+    A failed flush is **raised**, never swallowed: "the bytes are on the
+    platter" is the whole point of asking for it, so a caller that asked
+    for durability must never be told a non-durable write succeeded.
+    (Only "this platform cannot fsync a directory" — EINVAL/ENOTSUP — is
+    tolerated; see ``_FSYNC_UNSUPPORTED``.)
     """
     tmp = _tmp_path(path)
     parent = os.path.dirname(tmp)
@@ -86,7 +99,12 @@ def atomic_write(path, text):
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(text)
+            if fsync:
+                f.flush()
+                os.fsync(f.fileno())
         os.replace(tmp, path)
+        if fsync:
+            _fsync_dir(parent)
     except BaseException:
         # 写失败时不要把半截临时文件留在目录里。
         # 只删**我们刚创建**的那个 —— os.open 失败 (例如路径已存在) 时
@@ -96,6 +114,45 @@ def atomic_write(path, text):
         except OSError:
             pass
         raise
+
+
+#: 刷盘时表示"这个平台/文件系统不支持"而不是"刷盘失败"的 errno。
+#:
+#: 对目录 fd 做 fsync 时, 少数平台会返回 EINVAL / ENOTSUP —— 那是**能力
+#: 缺失**, 不是刷盘失败。真正的失败 (EIO / ENOSPC / EROFS / EDQUOT …)
+#: 不在这个集合里, 必须往上抛: 通知投递状态靠这一步保证"已经尝试过"
+#: 的记录不会因为掉电丢失, 而丢记录 = 同一条消息发两遍。
+_FSYNC_UNSUPPORTED = frozenset(
+    code for code in (getattr(errno, 'EINVAL', None),
+                      getattr(errno, 'ENOTSUP', None),
+                      getattr(errno, 'EOPNOTSUPP', None))
+    if code is not None)
+
+
+def _fsync_dir(directory):
+    """把目录项本身刷盘 —— 让 os.replace 的重命名真正落地。
+
+    失败必须往上抛, 不能当成"写成功了": 通知投递状态是 at-most-once 的
+    唯一依据, 刷盘失败却继续往下走 = 下一轮会重发同一条 LINE 消息。
+    只有"这个平台/文件系统根本不支持对目录刷盘" (EINVAL / ENOTSUP) 才
+    放过 —— 那是能力缺失, 不是刷盘失败。
+    """
+    if not directory:
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError as exc:
+        if exc.errno in _FSYNC_UNSUPPORTED:
+            return
+        raise
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno in _FSYNC_UNSUPPORTED:
+            return
+        raise
+    finally:
+        os.close(fd)
 
 
 def probe_writable(directory):

@@ -366,6 +366,42 @@ sudo journalctl -u 'y8y-todo-notify-test@alice.service' -n 50 --no-pager
 it on but no user opt-in nothing is sent; after opting in the dry-run
 lists the expected reminders; `--test` confirms the credential works.
 
+### 9.0 Shared-task policy (the shipped defaults)
+
+The scheduler announces **shared tasks only** (`Y8Y_NOTIFY_TASK_SCOPE=shared`),
+digests them once a day at **06:00** Asia/Tokyo, reminds **30 minutes**
+before a task that has a clock time, and never sends anything late.
+
+```bash
+# The scope and the window are visible in the runner's own summary line.
+sudo systemctl start y8y-todo-notify-dry-run.service
+sudo journalctl -u y8y-todo-notify-dry-run.service -n 50 --no-pager
+#    → "notify=on channels=line scope=shared window=10m recipients=kara"
+```
+
+Acceptance points, all verifiable from the dry-run output and the state
+file:
+
+```bash
+sudo python3 -c "import json;d=json.load(open('$DATA/notify/notification_state.json'));\
+print(json.dumps(d,ensure_ascii=False,indent=2)[:4000])"
+```
+
+- a **private** task (`owner: <user>`) never appears in a plan, a digest
+  or a reminder — not even for its own owner;
+- a **shared** task due today with a clock time appears both in the
+  06:00 digest and in its own 30-minutes-before reminder;
+- a **shared all-day** task due today appears in the digest only;
+- an **overdue** task (due before today) appears in neither;
+- a task whose window has passed is recorded as `missed`, and a digest
+  missed at 06:00 is recorded as `missed` too — neither is sent later;
+- one entry per occurrence — re-running the scheduler never produces a
+  second message for the same occurrence.
+
+**Pass:** the digest contains exactly the shared tasks due *today*, the
+overdue and the private ones are absent, and a second run produces no
+new message.
+
 ### 9.1 Privacy checks (must all pass)
 
 ```bash
@@ -422,7 +458,45 @@ sudo python3 -c "import json;print(json.dumps(json.load(open('$DATA/notify/notif
 **Pass:** a second run produces no duplicate send; the state file
 records the delivery, so a restart of the scheduler does not re-notify.
 
-### 9.3 Credential isolation and permissions (operator acceptance)
+### 9.3 Delivery reliability (crash / concurrency / corrupt state)
+
+```bash
+# (a) 崩溃窗口: 状态里留下 sending 之后进程挂掉 → 下一轮**不重发**
+sudo python3 -c "import json;d=json.load(open('$DATA/notify/notification_state.json'));\
+print([s for v in d['reminders'].values() for s in v['channels'].values() if s['status']=='sending'])"
+
+# (b) 状态文件损坏 → 调度器整体停发 (fail closed), 退出码非 0, 一条都不发
+sudo systemctl stop y8y-todo-notify.timer          # 先停调度器
+sudo cp $DATA/notify/notification_state.json /tmp/state.bak
+echo '{ broken' | sudo tee $DATA/notify/notification_state.json >/dev/null
+sudo systemctl start y8y-todo-notify.service
+sudo journalctl -u y8y-todo-notify.service --no-pager | tail -5
+#    → 报错说明"通知投递状态文件损坏", 且没有任何新投递
+sudo cp /tmp/state.bak $DATA/notify/notification_state.json
+sudo systemctl start y8y-todo-notify.timer
+
+# (c) 并发: 两个调度进程撞在一起 → 抢不到锁的那一轮整轮跳过
+sudo systemctl start y8y-todo-notify.service &
+sudo systemctl start y8y-todo-notify.service
+#    → 其中一轮报 "another scheduler holds the delivery lock"
+```
+
+**Pass:** (a) a leftover `sending` record is never re-sent by the next run;
+(b) with a corrupt state file the scheduler sends nothing and exits non-zero,
+and it works again once the file is restored; (c) two concurrent runs never
+produce a duplicate delivery — the loser skips the round explicitly.
+
+**Recovery note:** repairing a corrupt state file means *stop the timer →
+back the file up → repair it → start the timer again*. Do **not** simply
+move the state file aside and let the scheduler rebuild it — that discards
+the dedup history and re-sends everything that already went out
+(`docs/deployment.md` §5.2).
+
+A persistence failure is fail-closed the same way: the state file is
+written with `fsync`, so a full disk or an I/O error makes the scheduler
+stop **before** it sends, with `状态落盘失败` in the journal.
+
+### 9.4 Credential isolation and permissions (operator acceptance)
 
 On the target Linux host, after the ACL setup and controlled Web restart in
 `docs/deployment.md` §5.2.6, run the audit as root:

@@ -245,14 +245,15 @@ def test_provider_error_message_keeps_its_retry_semantics(tmp_path):
 def test_delivery_state_and_report_never_contain_credentials(tmp_path):
     """投递失败时, 状态文件 + 报告 + 日志里都不能出现凭据。"""
     data = tmp_path / 'data'
+    # 共享任务 + lead=0 → 提醒正落在 now 那一分钟, 确实会去投递
     _write_task(data, 'todo', 'a.md', title='开会', due='2026-10-27',
-                due_time='09:00', owner='alice')
+                due_time='09:00', owner='shared')
     provider = FakeProvider(
         fail_times=99,
         error=ProviderError(f'upstream rejected Bearer {FAKE_LINE_TOKEN}'))
     sched = _make_scheduler(data, {'fake': provider},
                             now=datetime(2026, 10, 27, 9, 0, tzinfo=TZ),
-                            settings={'alice': _enabled()},
+                            settings={'alice': _enabled(lead_minutes=0)},
                             Y8Y_NOTIFY_LINE_TOKEN=FAKE_LINE_TOKEN)
     report = sched.run()
 
