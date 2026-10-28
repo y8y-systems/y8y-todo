@@ -757,6 +757,15 @@ sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
 | `notification_settings.json` | web (`y8y`) | scheduler | group `y8y-notify` |
 | `notification_state.json` | scheduler | backup / operator | group `y8y-notify` |
 | `notification_channels.json` | scheduler | web (`y8y`) | group `y8y-notify` |
+| `notification.lock` | scheduler | scheduler | group `y8y-notify` |
+
+`notification.lock` is an empty `flock` file the scheduler creates on its
+first run. It serialises whole scheduler runs, so two timer ticks (or a
+timer tick racing a manual run) can never claim the same notification. It
+holds no data: if it was created by another account and the scheduler can no
+longer open it, the scheduler **stops** (fail closed) instead of delivering
+without the lock — recreate it with
+`sudo install -o y8y-notify -g y8y-notify -m 0664 /var/lib/y8y-todo/notify/notification.lock`.
 
 Why each piece is there:
 

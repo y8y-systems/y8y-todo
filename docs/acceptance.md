@@ -458,7 +458,33 @@ sudo python3 -c "import json;print(json.dumps(json.load(open('$DATA/notify/notif
 **Pass:** a second run produces no duplicate send; the state file
 records the delivery, so a restart of the scheduler does not re-notify.
 
-### 9.3 Credential isolation and permissions (operator acceptance)
+### 9.3 Delivery reliability (crash / concurrency / corrupt state)
+
+```bash
+# (a) 崩溃窗口: 状态里留下 sending 之后进程挂掉 → 下一轮**不重发**
+sudo python3 -c "import json;d=json.load(open('$DATA/notify/notification_state.json'));\
+print([s for v in d['reminders'].values() for s in v['channels'].values() if s['status']=='sending'])"
+
+# (b) 状态文件损坏 → 调度器整体停发 (fail closed), 退出码非 0, 一条都不发
+sudo cp $DATA/notify/notification_state.json /tmp/state.bak
+echo '{ broken' | sudo tee $DATA/notify/notification_state.json >/dev/null
+sudo systemctl start y8y-todo-notify.service
+sudo journalctl -u y8y-todo-notify.service --no-pager | tail -5
+#    → 报错说明"通知投递状态文件损坏", 且没有任何新投递
+sudo cp /tmp/state.bak $DATA/notify/notification_state.json
+
+# (c) 并发: 两个调度进程撞在一起 → 抢不到锁的那一轮整轮跳过
+sudo systemctl start y8y-todo-notify.service &
+sudo systemctl start y8y-todo-notify.service
+#    → 其中一轮报 "another scheduler holds the delivery lock"
+```
+
+**Pass:** (a) a leftover `sending` record is never re-sent by the next run;
+(b) with a corrupt state file the scheduler sends nothing and exits non-zero,
+and it works again once the file is restored; (c) two concurrent runs never
+produce a duplicate delivery — the loser skips the round explicitly.
+
+### 9.4 Credential isolation and permissions (operator acceptance)
 
 On the target Linux host, after the ACL setup and controlled Web restart in
 `docs/deployment.md` §5.2.6, run the audit as root:

@@ -350,6 +350,11 @@ resets notification preferences and history:
 | `notification_state.json` | delivery state — what was already sent, and how it ended |
 | `notification_channels.json` | credential-free capability table written by the scheduler |
 
+The scheduler also creates an empty `notification.lock` in the same
+directory: an `flock` file lock that keeps two scheduler processes from
+claiming the same notification at the same time. It holds no data and
+can be deleted while no scheduler is running.
+
 They live in their own directory (not in the data directory root) because
 the scheduler and the web app both need to write in there, and `atomic_write`
 creates a temporary file *in the same directory* before renaming it over
@@ -358,6 +363,19 @@ file. Giving the scheduler write access to the data directory root would
 therefore also let it replace `internal_tokens.json`, the machine-to-machine
 credential map. The dedicated directory keeps "both may write here, nowhere
 else" true.
+
+Delivery is **at-most-once**, and the state file is the only thing that
+makes that true:
+
+- every attempt is written to `notification_state.json` **before** the LINE
+  API is called, so a crash between "sent" and "recorded" leaves a
+  `sending` marker instead of an empty slot — the next round does not send
+  again (a lost message is preferred over a duplicate one);
+- a state file that cannot be read or is not valid JSON **stops** the
+  scheduler instead of being treated as an empty history (which would
+  re-send everything); a *missing* state file is a normal first run;
+- an `flock` on `notification.lock` serialises whole runs, so two timer
+  ticks can never claim the same notification.
 
 ## Backups, restore, upgrades
 

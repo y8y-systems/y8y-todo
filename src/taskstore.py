@@ -63,7 +63,7 @@ def _tmp_path(path):
     return f'{path}.{os.getpid()}.{os.urandom(4).hex()}.tmp'
 
 
-def atomic_write(path, text):
+def atomic_write(path, text, fsync=False):
     """Write text to path atomically (tmp file + rename).
 
     A crash mid-write can never leave a half-written task or list file
@@ -77,6 +77,12 @@ def atomic_write(path, text):
     service accounts (the web app and the scheduler — see
     docs/deployment.md §5.2). The resulting permissions are unchanged:
     ``os.open`` applies the process umask exactly like ``open()`` did.
+
+    ``fsync=True`` additionally flushes the file (and the directory entry)
+    to stable storage before returning. It costs a few milliseconds, so it
+    is opt-in: the notification delivery state uses it because that file is
+    the *only* record of "this notification was already attempted" — losing
+    it to a power cut would mean sending the same LINE message twice.
     """
     tmp = _tmp_path(path)
     parent = os.path.dirname(tmp)
@@ -86,7 +92,12 @@ def atomic_write(path, text):
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(text)
+            if fsync:
+                f.flush()
+                os.fsync(f.fileno())
         os.replace(tmp, path)
+        if fsync:
+            _fsync_dir(parent)
     except BaseException:
         # 写失败时不要把半截临时文件留在目录里。
         # 只删**我们刚创建**的那个 —— os.open 失败 (例如路径已存在) 时
@@ -96,6 +107,26 @@ def atomic_write(path, text):
         except OSError:
             pass
         raise
+
+
+def _fsync_dir(directory):
+    """把目录项本身刷盘 —— 让 os.replace 的重命名真正落地。
+
+    某些系统 (例如 macOS) 对目录 fd 的 fsync 会报 EINVAL, 那就跳过:
+    文件内容已经 fsync 过了, 剩下的只是目录项的持久性。
+    """
+    if not directory:
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def probe_writable(directory):

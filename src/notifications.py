@@ -20,6 +20,10 @@ writes two side-car files inside the data directory:
 ``<data_dir>/notify/notification_channels.json``
     the credential-free capability table the web app renders.
 
+``<data_dir>/notify/notification.lock``
+    an empty ``flock`` file — it serialises whole scheduler runs so two
+    timer ticks can never claim the same notification.
+
 All three live in a **dedicated state directory** (``<data_dir>/notify``)
 rather than in the data directory root: the scheduler runs under its own
 system account and needs write access to its own state, but the data
@@ -46,7 +50,20 @@ Safety rules baked into this module:
    recorded in the state file, and a recorded outcome — sent, failed or
    missed — is final: nothing is ever retried, and a moment whose window
    has passed is dropped instead of fired late.
+5. **Write before you send.** The attempt is persisted *before* the LINE
+   API is called, so a crash in between leaves a ``sending`` marker —
+   which the next round treats as final (a lost message is preferred over
+   a duplicate one).
+6. **Fail closed.** An unreadable or corrupt state file stops the
+   scheduler instead of being treated as an empty history; a *missing*
+   state file is a normal first run. Two scheduler processes are
+   serialised by an ``flock``, so they can never claim the same
+   notification.
 """
+try:
+    import fcntl                     # POSIX 文件锁 —— 跨进程互斥
+except ImportError:                  # pragma: no cover - 非 POSIX 平台
+    fcntl = None
 import json
 import os
 import re
@@ -66,15 +83,20 @@ from taskstore import (
 )
 
 __all__ = [
+    'BLOCKED_STATUSES',
     'DEFAULT_DIGEST_TIME',
     'DEFAULT_LEAD_MINUTES',
     'DEFAULT_WINDOW_MINUTES',
+    'IN_FLIGHT_STATUS',
+    'LOCK_FILE',
     'TASK_SCOPES',
     'TERMINAL_STATUSES',
     'Capabilities',
+    'DeliveryLock',
     'EmailProvider',
     'LineProvider',
     'Message',
+    'NotificationStateCorrupt',
     'NotificationStateError',
     'NotifyConfig',
     'Provider',
@@ -137,6 +159,21 @@ TASK_SCOPES = ('shared', 'own_and_shared')
 #: ``sent``     是"发出去了" —— 不重复发。
 TERMINAL_STATUSES = ('sent', 'failed', 'exhausted', 'missed')
 
+#: 投递尝试中的**中间状态** —— 写前持久化留下的痕迹。
+#:
+#: 调度器在调用 provider **之前**先把状态写成 sending 并落盘, 然后才真
+#: 正发出去。进程若崩在"已经发出去了"与"结果回写"之间, 状态文件里留下
+#: 的就是 sending —— 下一轮看到它就不再重发 (宁可漏发, 绝不重发)。
+IN_FLIGHT_STATUS = 'sending'
+
+#: 终态 **加上** 中间态 —— 出现任何一个都不再投递。
+#:
+#: 中间态也算进去是刻意的: 那一次尝试的结果**未知**, 补发 = 可能重发。
+BLOCKED_STATUSES = TERMINAL_STATUSES + (IN_FLIGHT_STATUS,)
+
+#: 跨进程投递锁的文件名 (放在通知状态目录里)。
+LOCK_FILE = 'notification.lock'
+
 #: 提前提醒时间的合法范围 (分钟)
 MAX_LEAD_MINUTES = 1440
 
@@ -182,6 +219,80 @@ class NotificationStateError(Exception):
         if self.detail:
             lines.insert(1, f'  ({self.detail})')
         return '\n'.join(lines)
+
+
+class NotificationStateCorrupt(NotificationStateError):
+    """投递状态文件损坏 —— 宁可一条都不发, 也不当成"全新状态"继续投。
+
+    状态文件是"不重复发送"的**唯一依据**。读不出来时若把它当成空状态,
+    调度器会把所有到期的提醒**重新发一遍** —— 用户会收到一整片重复通知。
+    所以这里 fail closed: 一次都不发, 等人工把状态文件修好。
+
+    首次运行时状态文件**不存在**是正常的 (见 ``StateStore._read``),
+    不走这条路。
+    """
+
+    def __init__(self, path, detail=''):
+        self.path = str(path)
+        super().__init__(os.path.dirname(self.path), detail)
+
+    def _message(self):
+        lines = [
+            f'通知投递状态文件损坏: {self.path}',
+            '无法读取投递状态 —— 若把它当成全新状态继续投递, 同一条提醒会'
+            '被反复发送, 因此本次不发送任何通知。',
+            '处理 (以 root 执行):',
+            f'  sudo mv {self.path} {self.path}.broken',
+            '  # 移走损坏文件后调度器会重建状态 (已发出的记录会丢失, '
+            '请按需人工核对)',
+            '详见 docs/deployment.md §5.2。',
+        ]
+        if self.detail:
+            lines.insert(1, f'  ({self.detail})')
+        return '\n'.join(lines)
+
+
+class DeliveryLock:
+    """跨进程投递锁 (``flock``) —— 同一时刻只允许一个调度进程投递。
+
+    计时器触发、运维手动跑、两个 tick 撞在一起 —— 都有可能让两个进程
+    同时读到"还没发过"的状态, 然后各发一遍。``flock`` 把"读状态 →
+    判重 → 投递 → 写状态"这一整段变成临界区: 抢不到锁的那一轮**直接
+    跳过**, 一条都不发 (下一轮自然会补上)。
+
+    只是一个文件锁 —— 不引入数据库, 也不多起一个服务。
+    """
+
+    def __init__(self, path):
+        self.path = str(path)
+        self._fd = None
+
+    def acquire(self):
+        """拿到锁返回 True; 别人正持有返回 False。"""
+        if fcntl is None:                 # pragma: no cover - 非 POSIX 平台
+            return True
+        try:
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o666)
+        except OSError as exc:
+            raise NotificationStateError(
+                os.path.dirname(self.path),
+                f'投递锁打不开 ({self.path}): {exc.strerror or str(exc)}')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False                   # 别人在投 → 这一轮跳过
+        self._fd = fd
+        return True
+
+    def release(self):
+        if self._fd is None:
+            return
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+        finally:
+            os.close(self._fd)
+            self._fd = None
 
 
 def _parse_targets(raw):
@@ -435,11 +546,45 @@ class StateStore:
 
     每条记录里的 ``status`` 是**终态**: sent / failed / exhausted /
     missed。调度器看到终态就不再动它 —— 失败不重试, 错过不补发。
+
+    投递状态是 at-most-once 的**唯一依据**, 所以这份文件的语义是
+    fail closed 的:
+
+    * 文件**不存在** → 首次运行, 正常初始化成空状态;
+    * 文件**读不出来 / JSON 坏了 / 结构不对** → 抛
+      ``NotificationStateCorrupt``, 一次都不发 (绝不当成空状态);
+    * 每次投递尝试**先落盘再发**, 落盘后进程崩掉 → 状态留在
+      ``sending`` (中间态), 下一轮看到它就不再重发。
     """
 
     def __init__(self, path):
-        self.path = path
-        self.data = self._read()
+        self.path = str(path)
+        self._data = None
+
+    @property
+    def data(self):
+        """投递状态 —— 第一次访问时才从磁盘读。
+
+        读盘被推迟到真正要用状态的那一刻: 损坏/读不了的状态文件要
+        在**投递之前**暴露出来 (fail closed), 而不是让构造调度器的
+        调用方先炸掉。
+        """
+        if self._data is None:
+            self._data = self._read()
+        return self._data
+
+    @data.setter
+    def data(self, value):
+        self._data = value
+
+    def reload(self):
+        """重新从磁盘读一遍状态 —— 拿到投递锁之后调用。
+
+        锁是"读状态 → 判重 → 投递 → 写状态"这一整段的互斥门: 抢到锁
+        之后必须重读, 否则手里可能是别的进程**还没写**的旧快照。
+        """
+        self._data = self._read()
+        return self._data
 
     @property
     def directory(self):
@@ -469,25 +614,48 @@ class StateStore:
         raise NotificationStateError(directory, detail)
 
     def _read(self):
+        """读投递状态 —— **fail closed**。
+
+        * 文件不存在 → 首次运行, 正常初始化成空状态;
+        * 读不出来 / JSON 坏了 / 结构不对 → 抛
+          ``NotificationStateCorrupt``。
+
+        绝不能把"读不出来"当成"空状态": 那等于把已经发过的提醒全部
+        重新发一遍。
+        """
         empty = {'version': STATE_VERSION, 'reminders': {}, 'digests': {}}
         try:
             with open(self.path, encoding='utf-8') as f:
-                data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return empty
+                raw = f.read()
+        except FileNotFoundError:
+            return empty                     # 首次运行: 还没有状态文件
+        except OSError as exc:
+            raise NotificationStateCorrupt(self.path, exc.strerror or str(exc))
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise NotificationStateCorrupt(self.path, f'JSON 解析失败: {exc}')
         if not isinstance(data, dict):
-            return empty
+            raise NotificationStateCorrupt(self.path, '顶层不是一个 JSON 对象')
+        for key in ('reminders', 'digests'):
+            if key in data and not isinstance(data[key], dict):
+                raise NotificationStateCorrupt(self.path, f'{key} 不是一个 JSON 对象')
         data.setdefault('version', STATE_VERSION)
-        if not isinstance(data.get('reminders'), dict):
-            data['reminders'] = {}
-        if not isinstance(data.get('digests'), dict):
-            data['digests'] = {}
+        data.setdefault('reminders', {})
+        data.setdefault('digests', {})
         return data
 
     def save(self):
+        """把投递状态落盘。
+
+        ``fsync=True``: 这份文件是"已经尝试过投递"的唯一记录, 掉电
+        丢失就意味着同一条 LINE 消息会被发两遍 —— 所以这里真的刷盘。
+        """
         self.data['version'] = STATE_VERSION
         self.data['updated_at'] = datetime.now(_timezone.utc).isoformat()
-        atomic_write(self.path, json.dumps(self.data, ensure_ascii=False, indent=2, sort_keys=True))
+        atomic_write(self.path,
+                     json.dumps(self.data, ensure_ascii=False, indent=2, sort_keys=True),
+                     fsync=True)
 
     # ── reminders ──
     def reminder(self, key):
@@ -1002,12 +1170,37 @@ class Scheduler:
             report['skipped'].append({'reason': 'no user has enabled notifications'})
             return report
 
-        if not dry_run:
-            # 投递状态是"不重复发送"的唯一依据: 写不进去 = 每轮都会重发。
-            # 所以先探一次状态目录可写性, 探不过就**一条都不发**
-            # (fail closed) —— 而不是发完才发现记不下来。
-            self.state_store.ensure_writable()
+        if dry_run:
+            # 只算不发 —— 不需要互斥锁 (锁住反而会挡住真正的投递)。
+            self.state_store.reload()
+            self._deliver_all(users, report, dry_run)
+            return report
 
+        # 投递状态是"不重复发送"的唯一依据: 写不进去 = 每轮都会重发。
+        # 所以先探一次状态目录可写性, 探不过就**一条都不发**
+        # (fail closed) —— 而不是发完才发现记不下来。
+        self.state_store.ensure_writable()
+
+        # 跨进程互斥: 两个调度进程不能同时认领同一条通知。
+        # 抢不到锁的那一轮直接跳过 (一条都不发), 下一轮自然会补上。
+        lock = DeliveryLock(os.path.join(self.state_dir, LOCK_FILE))
+        if not lock.acquire():
+            report['skipped'].append(
+                {'reason': 'another scheduler holds the delivery lock — this round skipped'})
+            self.log.append('delivery lock is held by another process — skipped this round')
+            return report
+        try:
+            # 抢到锁之后**重读**状态: 锁外读到的可能是别的进程还没写
+            # 的旧快照, 拿着它判重就等于两个进程各发一遍。
+            self.state_store.reload()
+            self._deliver_all(users, report, dry_run)
+        finally:
+            lock.release()
+
+        return report
+
+    def _deliver_all(self, users, report, dry_run):
+        """真正的投递循环 (调用方已经拿到互斥锁)。"""
         tasks = scan_tasks(self.data_dir, self.config.default_owner)
         live_keys = set()
 
@@ -1177,25 +1370,38 @@ class Scheduler:
         }
         for channel in channels:
             state = self.state_store.channel_state(key, channel)
-            if state and state.get('status') in TERMINAL_STATUSES:
-                continue                    # 已有终态 → 不重发 (at-most-once)
+            if state and state.get('status') in BLOCKED_STATUSES:
+                continue                    # 已有终态/中间态 → 不重发 (at-most-once)
             if dry_run:
                 report['planned'].append({'user': user, 'channel': channel,
                                           'task': task.title, 'kind': message.kind})
                 continue
+            attempts = int((state or {}).get('attempts', 0)) + 1
+
+            # ── 写前持久化 ──
+            # 先把"投递尝试中"落盘, **再**调 provider。进程若崩在中间
+            # (发出去了但结果没回写), 状态文件里留下的是 sending ——
+            # 下一轮看到它就不再重发 (宁可漏发, 绝不重发)。
+            self.state_store.set_channel_state(
+                key, channel,
+                {'status': IN_FLIGHT_STATUS, 'at': _now_iso(self.now),
+                 'attempts': attempts},
+                meta)
+            self.state_store.save()
+
             try:
                 self.providers[channel].send(user, message)
             except ProviderError as e:
                 # at-most-once: **不重试**。一次投递只有一次机会 ——
                 # 失败就记成终态, 下一轮不再重发 (偶发网络故障会丢消息,
                 # 这是明确接受的取舍: 宁可少一条, 也不要重复轰炸)。
-                attempts = int((state or {}).get('attempts', 0)) + 1
                 retryable = bool(getattr(e, 'retryable', True))
                 status = 'failed' if retryable else 'exhausted'
                 payload = {'status': status, 'at': _now_iso(self.now),
                            'attempts': attempts, 'error': self._safe_error(e, 200),
                            'retryable': retryable}
                 self.state_store.set_channel_state(key, channel, payload, meta)
+                self.state_store.save()
                 report['failed'].append({'user': user, 'channel': channel,
                                          'task': task.title, 'error': self._safe_error(e, 200),
                                          'status': status})
@@ -1203,9 +1409,9 @@ class Scheduler:
                                 f'task={task.title!r} status={status} '
                                 f'error={self._safe_error(e, 120)}')
             else:
-                attempts = int((state or {}).get('attempts', 0)) + 1
                 payload = {'status': 'sent', 'at': _now_iso(self.now), 'attempts': attempts}
                 self.state_store.set_channel_state(key, channel, payload, meta)
+                self.state_store.save()
                 report['sent'].append({'user': user, 'channel': channel,
                                        'task': task.title, 'kind': message.kind})
                 self.log.append(f'sent user={user} channel={channel} kind={message.kind}')
@@ -1238,23 +1444,34 @@ class Scheduler:
                 report['skipped'].append(
                     {'user': user, 'channel': channel, 'kind': 'digest',
                      'reason': 'digest window expired — not sent late'})
+            if not dry_run:
+                self.state_store.save()
             return
 
         message = self._digest_message(user, items)
         for channel in channels:
             key = f'{user}|{day}|{channel}'
             state = self.state_store.digest_state(key)
-            if state and state.get('status') in TERMINAL_STATUSES:
+            if state and state.get('status') in BLOCKED_STATUSES:
                 continue                    # 今天已经发过 (或已错过) → 不再发
             if dry_run:
                 report['planned'].append({'user': user, 'channel': channel,
                                           'kind': 'digest', 'day': day})
                 continue
+            attempts = int((state or {}).get('attempts', 0)) + 1
+
+            # ── 写前持久化 (同单点提醒) ──
+            # 摘要只有一次机会: 崩在"发出去了"与"结果回写"之间时,
+            # 状态留在 sending, 下一轮不再重发。
+            self.state_store.set_digest_state(
+                key, {'status': IN_FLIGHT_STATUS, 'at': _now_iso(self.now),
+                      'attempts': attempts})
+            self.state_store.save()
+
             try:
                 self.providers[channel].send(user, message)
             except ProviderError as e:
                 # 同单点提醒: 失败即终态, 不重试, 不补发。
-                attempts = int((state or {}).get('attempts', 0)) + 1
                 retryable = bool(getattr(e, 'retryable', True))
                 status = 'failed' if retryable else 'exhausted'
                 payload = {'status': status, 'at': _now_iso(self.now), 'attempts': attempts,
@@ -1265,7 +1482,8 @@ class Scheduler:
             else:
                 self.state_store.set_digest_state(key, {'status': 'sent',
                                                         'at': _now_iso(self.now),
-                                                        'attempts': 1})
+                                                        'attempts': attempts})
+                self.state_store.save()
                 report['sent'].append({'user': user, 'channel': channel, 'kind': 'digest'})
                 self.log.append(f'sent digest user={user} channel={channel} day={day}')
 
