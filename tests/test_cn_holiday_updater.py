@@ -26,6 +26,22 @@ def fixture(name):
     return (FIX / name).read_bytes()
 
 
+def absent_sources():
+    """「最新索引 + 历史归档 + 精确检索」三方都确认目标年份缺席。"""
+    return dict(feed_bytes=fixture("feed-not-published.json"),
+                history_bytes=fixture("history-archive.json"),
+                exact_bytes=fixture("history-exact-none.json"),
+                allow_network=False)
+
+
+def published_in_history_only():
+    """通知已发布，但已被「最新政策」滚动列表移除。"""
+    return dict(feed_bytes=fixture("feed-not-published.json"),
+                history_bytes=fixture("history-archive-with-2027.json"),
+                notice_bytes=fixture("notice-2027.html"),
+                allow_network=False)
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     """一份隔离的仓库副本；所有写操作都落在这里。"""
@@ -84,13 +100,170 @@ def test_no_llm_or_agent_dependency():
 
 def test_not_published_writes_nothing(repo):
     data = u.load_data()
-    result = u.run_check(data, dt.date(2026, 11, 16),
-                         feed_bytes=fixture("feed-not-published.json"),
-                         allow_network=False)
+    result = u.run_check(data, dt.date(2026, 11, 16), **absent_sources())
     assert result["status"] == "not-published"
+    # 必须是「两个官方来源都确认缺席」，而不是「最新索引里没看到」。
+    assert "历史归档" in result["message"] and "精确年份检索" in result["message"]
     assert "尚未" in result["message"] and "12-16" in result["next_check"]
     assert repo["data"].read_bytes() == repo["data_bytes"]
     assert repo["index"].read_bytes() == repo["index_bytes"]
+
+
+# ── 可靠性回归：通知已发布但退出「最新政策」滚动列表 ──────────────────────
+
+@pytest.mark.parametrize("today", ["2026-11-16", "2026-12-16", "2027-01-16"])
+def test_published_but_evicted_from_latest_index_is_still_found(repo, today):
+    """11/16、12/16、次年 1/16 三次补查都不能因通知退出最新索引而漏检。"""
+    data = u.load_data()
+    result = u.run_check(data, dt.date.fromisoformat(today),
+                         **published_in_history_only())
+    assert result["status"] == "ready", result["message"]
+    assert "历史归档" in result["source"]
+    assert result["candidate"]["url"].endswith("content_7000001.htm")
+    assert result["candidate"]["published"] == "2026-11-10"
+    assert result["candidate"]["wenhao"] == "国办发明电〔2026〕1号"
+    assert repo["data"].read_bytes() == repo["data_bytes"]   # check 阶段不写文件
+
+
+def test_history_discovered_notice_applies_safely(repo):
+    """兜底发现的候选走同一套严格校验 / 原子写入 / 幂等，不降级。"""
+    data = u.load_data()
+    result = u.run_check(data, dt.date(2026, 12, 16), **published_in_history_only())
+    assert result["status"] == "ready"
+    assert u.apply_candidate(data, result["candidate"])["status"] == "updated"
+    new_data = json.loads(repo["data"].read_text(encoding="utf-8"))
+    assert "2027" in new_data["schedules"]
+    assert new_data["schedules"]["2026"] == data["schedules"]["2026"]
+    assert u.validate_data(new_data) == []
+    assert u.media_count(repo["index"].read_text(encoding="utf-8")) == 5
+    assert u.run_check(u.load_data(), dt.date(2026, 12, 16),
+                       **published_in_history_only())["status"] == "already-present"
+
+
+def test_latest_index_is_preferred_over_history(repo):
+    """首选仍是最新政策索引：命中时不应再依赖历史检索。"""
+    data = u.load_data()
+    result = u.run_check(data, dt.date(2026, 11, 16),
+                         feed_bytes=fixture("feed-2027-published.json"),
+                         history_bytes=fixture("history-archive-broken.json"),
+                         notice_bytes=fixture("notice-2027.html"),
+                         allow_network=False)
+    assert result["status"] == "ready"
+    assert result["source"] == "最新政策索引"
+    assert result["candidate"]["url"].endswith("content_7000000.htm")
+
+
+def test_exact_year_query_recovers_notice_missing_from_archive(repo):
+    """历史归档尚未收录、但精确年份检索已能查到时，仍应发现通知。"""
+    data = u.load_data()
+    result = u.run_check(data, dt.date(2026, 11, 16),
+                         feed_bytes=fixture("feed-not-published.json"),
+                         history_bytes=fixture("history-archive.json"),
+                         exact_bytes=fixture("history-exact-2027-found.json"),
+                         notice_bytes=fixture("notice-2027.html"),
+                         allow_network=False)
+    assert result["status"] == "ready", result["message"]
+
+
+# ── 无法确认时必须 check-unavailable，绝不误报未公布 ──────────────────────
+
+@pytest.mark.parametrize("history_name", [
+    "history-archive-broken.json",   # 抓回 HTML / 非法 JSON
+    "history-archive-empty.json",    # 合法响应但查不到任何往年通知（自检失败）
+])
+def test_history_source_unusable_is_check_unavailable(repo, history_name):
+    data = u.load_data()
+    result = u.run_check(data, dt.date(2026, 11, 16),
+                         feed_bytes=fixture("feed-not-published.json"),
+                         history_bytes=fixture(history_name),
+                         allow_network=False)
+    assert result["status"] == "check-unavailable", result
+    assert "不误报" in result["message"]
+    assert repo["data"].read_bytes() == repo["data_bytes"]
+
+
+def test_exact_year_query_error_is_check_unavailable(repo):
+    data = u.load_data()
+    result = u.run_check(data, dt.date(2026, 11, 16),
+                         feed_bytes=fixture("feed-not-published.json"),
+                         history_bytes=fixture("history-archive.json"),
+                         exact_bytes=fixture("history-exact-error.json"),
+                         allow_network=False)
+    assert result["status"] == "check-unavailable", result
+
+
+def test_primary_index_down_but_history_finds_notice(repo):
+    """首选索引整体不可用时，历史归档仍应把已发布的通知捞回来。"""
+    data = u.load_data()
+    result = u.run_check(data, dt.date(2026, 12, 16),
+                         feed_bytes=b"<html>503</html>",
+                         history_bytes=fixture("history-archive-with-2027.json"),
+                         notice_bytes=fixture("notice-2027.html"),
+                         allow_network=False)
+    assert result["status"] == "ready", result["message"]
+    assert "历史归档" in result["source"]
+
+
+def test_primary_index_down_and_history_absent_is_check_unavailable(repo):
+    """首选不可用 + 历史归档确认缺席 → 仍不能完整确认，绝不报 not-published。"""
+    data = u.load_data()
+    result = u.run_check(data, dt.date(2026, 12, 16),
+                         feed_bytes=b"<html>503</html>",
+                         history_bytes=fixture("history-archive.json"),
+                         exact_bytes=fixture("history-exact-none.json"),
+                         allow_network=False)
+    assert result["status"] == "check-unavailable", result
+    assert "无法完整确认" in result["message"]
+
+
+def test_no_history_fixture_offline_is_check_unavailable(repo):
+    """离线且没给历史样本 → 无法确认，不能沿用旧的 not-published 结论。"""
+    data = u.load_data()
+    result = u.run_check(data, dt.date(2026, 11, 16),
+                         feed_bytes=fixture("feed-not-published.json"),
+                         allow_network=False)
+    assert result["status"] == "check-unavailable"
+
+
+def test_history_archive_conflict_stops(repo):
+    data = u.load_data()
+    result = u.run_check(data, dt.date(2026, 11, 16),
+                         feed_bytes=fixture("feed-not-published.json"),
+                         history_bytes=fixture("history-archive-conflict.json"),
+                         allow_network=False)
+    assert result["status"] == "source-conflict"
+
+
+def test_history_archive_untrusted_url_stops(repo):
+    data = u.load_data()
+    result = u.run_check(data, dt.date(2026, 11, 16),
+                         feed_bytes=fixture("feed-not-published.json"),
+                         history_bytes=fixture("history-archive-untrusted.json"),
+                         allow_network=False)
+    assert result["status"] == "untrusted-source"
+
+
+def test_history_pcode_mismatch_requires_human(repo):
+    """检索记录文号与通知全文文号不一致 → 停止，不自动写数据。"""
+    data = u.load_data()
+    payload = json.loads(fixture("history-archive-with-2027.json").decode("utf-8"))
+    for item in payload["searchVO"]["listVO"]:
+        if "2027" in item["title"]:
+            item["pcode"] = "国办发明电〔2026〕99号"
+    result = u.run_check(data, dt.date(2026, 11, 16),
+                         feed_bytes=fixture("feed-not-published.json"),
+                         history_bytes=json.dumps(payload, ensure_ascii=False).encode(),
+                         notice_bytes=fixture("notice-2027.html"),
+                         allow_network=False)
+    assert result["status"] == "needs-human-review"
+    assert repo["data"].read_bytes() == repo["data_bytes"]
+
+
+def test_history_search_endpoint_is_official_and_https():
+    url = u.search_url(u.ARCHIVE_QUERY)
+    assert url.startswith("https://sousuo.www.gov.cn/search-gov/data?")
+    assert u.SEARCH_HOST not in u.TRUSTED_HOSTS, "检索域名不应被当作通知全文域名"
+    assert u.SEARCH_HOST in u.INDEX_HOSTS
 
 
 def test_untrusted_source_rejected(repo):

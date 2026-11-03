@@ -14,15 +14,27 @@ GitHub Actions（定时 / 手动）
         ├─ 该年份已有完整安排 ─────────────► 结束，一个字节都不改
         │
         ▼
-读取中国政府网公开的结构化政策索引（ZUIXINZHENGCE.json）
+① 读取中国政府网「最新政策」结构化索引（ZUIXINZHENGCE.json）—— 首选
         │
-        ├─ 没有目标年份的《国务院办公厅关于 XXXX 年部分节假日安排的通知》
-        │        └─► 「尚未公布」：不写占位数据，报告下次检查时间
+        ├─ 命中目标年份通知 ─────────────► 直接用它（不再查历史来源）
         │
-        ├─ 索引损坏 / 抓取失败 ──────────► 「检查无法完成」：任务失败并报告
-        │                                  （绝不把「抓不到」当成「未公布」）
+        ├─ 索引损坏 / 抓取失败 ──────────► check-unavailable：失败并报告
         │
-        ├─ 地址不在可信官方域名 / 多个官方地址冲突 ─► 停止，报告，转人工
+        └─ 未命中 → ② 必须再查**国务院政策文件库历史归档检索**
+                     （sousuo.www.gov.cn/search-gov/data, t=zhengcelibrary_gw）
+                     按标题一次取回 2007 年至今全部年度通知，与滚动列表互相独立
+                       │
+                       ├─ 归档查不到任何往年通知 / 返回异常 / 不可达
+                       │      └─► check-unavailable：无法确认，绝不误报「未公布」
+                       │
+                       ├─ 多个官方地址冲突 / 地址不可信 ─► 停止，报告
+                       │
+                       ├─ 归档命中目标年份 ─► 用历史归档里的官方 URL（不漏检）
+                       │
+                       └─ 归档健康但缺目标年份 → ③ 精确年份检索二次确认
+                              ├─ 官方明确返回「没有找到相关结果」且归档也无 → not-published
+                              ├─ 精确检索命中（归档尚未收录）→ 用该 URL
+                              └─ 精确检索异常 → check-unavailable
         │
         ▼
 抓取通知全文（只从可信官方域名），严格解析七条安排
@@ -60,12 +72,21 @@ Todo 应用运行时也不发任何网络请求：节假日数据仍是 `src/ind
 
 ## 3. 官方来源规则
 
-- 可信域名白名单：`www.gov.cn` / `gov.cn`、新华社、人民网。
-- 只认《国务院办公厅关于 XXXX 年部分节假日安排的通知》**原文**，标题必须精确匹配目标年份。
+两个互相独立的官方发现来源，缺一不可：
+
+| 优先级 | 来源 | 用途 | 局限 |
+|---|---|---|---|
+| 首选 | `www.gov.cn/zhengce/zuixin/ZUIXINZHENGCE.json` | 最新政策结构化索引 | 滚动列表，通知可能被挤出 |
+| 兜底 | `sousuo.www.gov.cn/search-gov/data`（`t=zhengcelibrary_gw`，国务院政策文件库） | 按标题一次取回 2007 年至今全部年度通知 + 精确年份检索 | 与首选独立，不会因为「最新」被清理而漏检 |
+
+- **最新索引里没有 ≠ 官方没发布**。首选未命中时必须走兜底；只有「最新索引 + 历史归档 + 精确年份检索」三方都确认缺席，才返回 `not-published`。
+- 历史归档必须自检：如果连往年通知都查不到，说明索引本身不可信 → `check-unavailable`，绝不误报。
+- 可信通知全文域名白名单：`www.gov.cn` / `gov.cn`、新华社、人民网；检索接口域名 `sousuo.www.gov.cn` **只用于查询**，不能作为通知全文来源。
+- 只认《国务院办公厅关于 XXXX 年部分节假日安排的通知》**原文**，标题必须精确匹配目标年份（检索结果里的 `<em>` 高亮标签会先归一化）。
 - 不采信：聚合页、预测文章、社交媒体、根据农历自行推算的调休日期、无文号网传安排。
-- 网页存在 ≠ 数据可信：必须逐条严格解析并通过全部校验才写数据。
+- 网页存在 ≠ 数据可信：必须逐条严格解析并通过全部校验才写数据；检索记录文号与通知全文文号不一致也会停下。
 - 每条安排都保留来源 URL 与文号（存在时）写入 `sources`，便于日后追溯。
-- 冲突（索引里多个不同官方地址）或来源不可信 → 停止自动提交。
+- 冲突（多个不同官方地址）或来源不可信 → 停止自动提交。
 
 ## 4. 定时检查
 
@@ -87,13 +108,20 @@ on:
 ## 5. 本地 / CI 可复现运行
 
 ```bash
-# 检查（真实联网，抓中国政府网公开索引）
+# 检查（真实联网：最新政策索引 → 历史归档 → 精确年份检索）
 python3 scripts/cn_holiday_updater.py check --today 2026-11-16
 
-# 完全离线演练（用仓库内的 fixture，模拟通知已发布；--today 固定演练基准日）
-python3 scripts/cn_holiday_updater.py check --no-network --today 2026-11-16 \
-  --index-feed tests/fixtures/cn_holiday/feed-2027-published.json \
+# 完全离线演练：通知已发布、但已被最新索引移除（本次修复的核心回归场景）
+python3 scripts/cn_holiday_updater.py check --no-network --today 2026-12-16 \
+  --index-feed tests/fixtures/cn_holiday/feed-not-published.json \
+  --history-feed tests/fixtures/cn_holiday/history-archive-with-2027.json \
   --notice-html tests/fixtures/cn_holiday/notice-2027.html
+
+# 完全离线演练：三方确认尚未公布
+python3 scripts/cn_holiday_updater.py check --no-network --today 2026-11-16 \
+  --index-feed tests/fixtures/cn_holiday/feed-not-published.json \
+  --history-feed tests/fixtures/cn_holiday/history-archive.json \
+  --exact-feed tests/fixtures/cn_holiday/history-exact-none.json
 
 # 在隔离副本上演练写入（不要对真实数据文件直接跑）
 cp -r holidays src /tmp/cn-holiday-rehearsal/
@@ -153,9 +181,12 @@ Bot 身份建 PR 才能让 4 个 `gate / *` Required Checks 正常触发；PR �
 | 情形 | 行为 |
 |---|---|
 | 目标年份已录入 | 幂等跳过，不改文件 |
-| 官方通知未公布 | 不写占位数据，报告下次检查时间 |
-| 索引抓取失败 / JSON 损坏 | `check-unavailable`，任务失败并报告，不误报「未公布」 |
-| 来源不可信 / 来源冲突 | 停止自动提交，报告 |
+| 官方通知未公布 | 需「最新索引 + 历史归档 + 精确年份检索」三方确认；不写占位数据，报告下次检查时间 |
+| 通知已发布但退出最新索引 | 由历史归档（或精确年份检索）发现，照常严格解析、生成更新 |
+| 首选索引抓取失败 / JSON 损坏 | `check-unavailable`，任务失败并报告，不误报「未公布」 |
+| 历史归档不可达 / 返回异常 / 查不到往年通知 | `check-unavailable`（自检失败），**绝不**误报「未公布」 |
+| 精确年份检索异常 | `check-unavailable`，不误报「未公布」 |
+| 来源不可信 / 来源冲突 / 检索文号与全文文号不一致 | 停止自动提交，报告 |
 | 解析或校验不通过 | `needs-human-review`，不写任何数据 |
 | 写入中途失败 | 回滚到写入前字节；不留下半写入文件 |
 | 写入后 `@media` 头数量变化 / 旧年份被改动 | 回滚并报错 |

@@ -53,6 +53,16 @@ def test_offline_rehearsal_cannot_create_pr():
     assert '"ready=false"' in text
 
 
+def test_scheduled_run_can_reach_official_history_fallback():
+    """正常检查不能被钉死在离线样本上：历史归档/精确检索必须允许联网兜底。"""
+    text = WF.read_text(encoding="utf-8")
+    assert "--history-feed" not in text, "定时检查不得固定历史检索离线样本"
+    assert "--exact-feed" not in text, "定时检查不得固定精确检索离线样本"
+    # --no-network 只允许出现在 offline_rehearsal 分支里
+    rehearsal_branch = text.split('if [ "$REHEARSAL" = "true" ]; then', 1)[1].split("else", 1)[0]
+    assert "--no-network" in rehearsal_branch
+
+
 def test_failure_is_reported():
     text = WF.read_text(encoding="utf-8")
     assert "GITHUB_STEP_SUMMARY" in text

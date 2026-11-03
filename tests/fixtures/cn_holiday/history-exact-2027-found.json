@@ -1,0 +1,19 @@
+{
+  "code": 200,
+  "msg": "操作成功",
+  "data": null,
+  "searchVO": {
+    "totalCount": 1,
+    "pageSize": 50,
+    "listVO": [
+      {
+        "title": "<em>国务院办公厅</em>关于<em>2027年</em>部分节假日安排的通知",
+        "url": "https://www.gov.cn/zhengce/zhengceku/202611/content_7000001.htm",
+        "pubtimeStr": "2026.11.10",
+        "pcode": "国办发明电〔2026〕1号",
+        "puborg": "国务院办公厅",
+        "totalCount": 0
+      }
+    ]
+  }
+}
