@@ -1,0 +1,256 @@
+name: cn-holiday-updater
+
+# 中国法定节假日年度更新：独立检查中国政府网的正式通知，严格解析后才生成更新 PR。
+# 旧调度语义：每年 11/16、12/16、1/16 的 10:00 JST = 01:00 UTC。
+# GitHub Actions 的定时任务可能延迟；语义是「这三天各检查一次」，不是精确准点。
+on:
+  schedule:
+    - cron: '0 1 16 11,12,1 *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只检查与校验，不写文件、不建 PR'
+        type: boolean
+        default: false
+      offline_rehearsal:
+        description: '用仓库内的离线 fixture 演练完整链路（永不写真实数据）'
+        type: boolean
+        default: false
+      notice_url:
+        description: '可选：人工核对过的官方通知地址（必须与政策索引一致，否则停止）'
+        type: string
+        default: ''
+
+# 默认最小权限；PR 写入只在 propose job 里通过 GitHub App Bot 令牌完成。
+permissions:
+  contents: read
+
+concurrency:
+  group: cn-holiday-updater-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: check official notice
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.run.outputs.status }}
+      target_year: ${{ steps.run.outputs.target_year }}
+      ready: ${{ steps.run.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Deterministic notice check (stdlib only, no LLM)
+        id: run
+        env:
+          NOTICE_URL: ${{ inputs.notice_url }}
+          REHEARSAL: ${{ inputs.offline_rehearsal }}
+        run: |
+          set +e
+          if [ "$REHEARSAL" = "true" ]; then
+            # fixture 的参考日期：让演练与目标年份计算都可复现，且不依赖真实年份。
+            python3 scripts/cn_holiday_updater.py check \
+              --no-network --today 2026-11-16 \
+              --index-feed tests/fixtures/cn_holiday/feed-2027-published.json \
+              --notice-html tests/fixtures/cn_holiday/notice-2027.html \
+              --status-file holiday-status.json \
+              --candidate-out holiday-candidate.json \
+              --summary-file holiday-summary.md
+          else
+            extra=()
+            if [ -n "$NOTICE_URL" ]; then extra+=(--notice-url "$NOTICE_URL"); fi
+            python3 scripts/cn_holiday_updater.py check "${extra[@]}" \
+              --status-file holiday-status.json \
+              --candidate-out holiday-candidate.json \
+              --summary-file holiday-summary.md
+          fi
+          rc=$?
+          set -e
+          cat holiday-summary.md >> "$GITHUB_STEP_SUMMARY"
+          status="$(python3 -c "import json;print(json.load(open('holiday-status.json'))['status'])")"
+          year="$(python3 -c "import json;print(json.load(open('holiday-status.json'))['target_year'])")"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "target_year=$year" >> "$GITHUB_OUTPUT"
+          # 离线演练只验证链路，绝不能拿 fixture 的模拟日期去建 PR。
+          if [ "$status" = "ready" ] && [ "$REHEARSAL" != "true" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$rc"
+
+      - name: Upload check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cn-holiday-check-${{ github.run_id }}
+          path: |
+            holiday-status.json
+            holiday-summary.md
+            holiday-candidate.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+  propose:
+    name: validate and propose update
+    needs: check
+    # 本 job 恒定运行（无 job 级 if）：正常「尚未公布」时 gate 才不会把 skipped 当失败。
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      BRANCH: chore/cn-holidays-${{ needs.check.outputs.target_year }}
+      YEAR: ${{ needs.check.outputs.target_year }}
+    steps:
+      - name: Nothing to propose
+        if: needs.check.outputs.ready != 'true' || needs.check.result != 'success'
+        run: |
+          echo "本轮无数据更新（status=${{ needs.check.outputs.status }}），不建 PR。" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@v4
+        if: needs.check.outputs.ready == 'true' && needs.check.result == 'success'
+
+      - uses: actions/setup-python@v5
+        if: needs.check.outputs.ready == 'true' && needs.check.result == 'success'
+        with:
+          python-version: '3.12'
+
+      - name: Re-check, validate and write the holiday data
+        id: apply
+        if: needs.check.outputs.ready == 'true' && needs.check.result == 'success'
+        env:
+          NOTICE_URL: ${{ inputs.notice_url }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set +e
+          extra=()
+          if [ -n "$NOTICE_URL" ]; then extra+=(--notice-url "$NOTICE_URL"); fi
+          if [ "$DRY_RUN" = "true" ]; then extra+=(--dry-run); fi
+          python3 scripts/cn_holiday_updater.py apply "${extra[@]}" \
+            --status-file holiday-apply-status.json \
+            --summary-file holiday-apply-summary.md
+          rc=$?
+          set -e
+          cat holiday-apply-summary.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "$DRY_RUN" = "true" ] || [ "$rc" -ne 0 ]; then
+            echo "wrote=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "wrote=true" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$rc"
+
+      - name: Assert only holiday data files changed
+        if: steps.apply.outputs.wrote == 'true'
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only | sort)"
+          expected="$(printf 'holidays/cn-holidays.json\nsrc/index.html' | sort)"
+          echo "changed files:"; echo "$changed"
+          if [ "$changed" != "$expected" ]; then
+            echo "::error::更新器改动了数据文件以外的代码，拒绝提交 PR"
+            exit 1
+          fi
+          python3 scripts/cn_holiday_updater.py verify --root .
+
+      - name: Look for an existing open PR (no duplicate PRs)
+        id: existing
+        if: steps.apply.outputs.wrote == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count="$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          if [ "$count" != "0" ]; then
+            echo "已存在同源 PR，本轮不重复创建。" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Detect PR automation credentials (Bot identity)
+        id: creds
+        if: steps.apply.outputs.wrote == 'true' && steps.existing.outputs.count == '0'
+        env:
+          APP_PRIVATE_KEY: ${{ secrets.CN_HOLIDAY_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "${{ vars.CN_HOLIDAY_APP_ID }}" ] && [ -n "$APP_PRIVATE_KEY" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint scoped GitHub App token
+        id: app-token
+        if: steps.creds.outputs.available == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.CN_HOLIDAY_APP_ID }}
+          private-key: ${{ secrets.CN_HOLIDAY_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Create PR with Bot identity (human approval still required)
+        if: steps.creds.outputs.available == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: ${{ env.BRANCH }}
+          delete-branch: true
+          author: y8y-systems <y8y-systems@users.noreply.github.com>
+          committer: GitHub <noreply@github.com>
+          commit-message: 'data(cn-holidays): 补录 ${{ env.YEAR }} 年放假安排与调休'
+          title: 'data(cn-holidays): 补录 ${{ env.YEAR }} 年放假安排与调休'
+          body-path: holiday-apply-summary.md
+          labels: cn-holidays
+          add-paths: |
+            holidays/cn-holidays.json
+            src/index.html
+
+      - name: Upload the verified patch when PR automation is not configured
+        if: steps.apply.outputs.wrote == 'true' && steps.existing.outputs.count == '0' && steps.creds.outputs.available != 'true'
+        run: |
+          git diff > cn-holiday-update.patch
+          {
+            echo "### 自动 PR 创建被阻塞"
+            echo ""
+            echo "更新已在本 job 的工作区生成并通过 \`verify\`，但仓库未配置"
+            echo "\`CN_HOLIDAY_APP_ID\` / \`CN_HOLIDAY_APP_PRIVATE_KEY\`，"
+            echo "工作流不能用 Bot 身份建 PR（也不能用个人账号绕过）。"
+            echo "请配置这两个 repository variable / secret 后重跑，或人工用仓库既有的"
+            echo "Bot 身份基于分支 \`$BRANCH\` 创建 PR。补丁已作为 artifact 上传。"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::自动 PR 创建阻塞：缺少 GitHub App Bot 凭据；本次不自动合并、不部署生产。"
+          exit 1
+
+      - name: Upload patch artifact
+        if: always() && steps.apply.outputs.wrote == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cn-holiday-patch-${{ github.run_id }}
+          path: cn-holiday-update.patch
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # 本仓库要求每个 workflow 恰好一个 gate / * 汇总 job（scripts/check-ci-gates.sh）。
+  # 这里不新增 Required Check 名称，也不改动其它四个 gate。
+  gate-cn-holidays:
+    name: gate / cn-holidays
+    runs-on: ubuntu-latest
+    needs: [check, propose]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - name: Aggregate upstream results
+        env:
+          RESULT_check: ${{ needs.check.result }}
+          RESULT_propose: ${{ needs.propose.result }}
+        run: |
+          set -euo pipefail
+          upstream=""
+          upstream="$upstream check=${RESULT_check}"
+          upstream="$upstream propose=${RESULT_propose}"
+          echo "upstream: $upstream"
+          CI_GATE_UPSTREAM="$upstream" bash scripts/ci-gate-check.sh
