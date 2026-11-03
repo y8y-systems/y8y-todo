@@ -1,0 +1,17 @@
+{
+  "code": 200,
+  "msg": "操作成功",
+  "data": null,
+  "searchVO": {
+    "totalCount": 1,
+    "pageSize": 50,
+    "listVO": [
+      {
+        "title": "无关页面",
+        "url": "https://www.gov.cn/zhengce/zhengceku/x.htm",
+        "pubtimeStr": "",
+        "pcode": ""
+      }
+    ]
+  }
+}

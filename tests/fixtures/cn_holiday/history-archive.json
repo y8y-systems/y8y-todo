@@ -1,0 +1,35 @@
+{
+  "code": 200,
+  "msg": "操作成功",
+  "data": null,
+  "searchVO": {
+    "totalCount": 3,
+    "pageSize": 50,
+    "listVO": [
+      {
+        "title": "<em>国务院办公厅</em>关于<em>2026年</em>部分节假日安排的通知",
+        "url": "https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm",
+        "pubtimeStr": "2025.11.04",
+        "pcode": "国办发明电〔2025〕7号",
+        "puborg": "国务院办公厅",
+        "totalCount": 0
+      },
+      {
+        "title": "<em>国务院办公厅</em>关于<em>2025年</em>部分节假日安排的通知",
+        "url": "https://www.gov.cn/zhengce/zhengceku/202411/content_6986383.htm",
+        "pubtimeStr": "2024.11.12",
+        "pcode": "国办发明电〔2024〕12号",
+        "puborg": "国务院办公厅",
+        "totalCount": 0
+      },
+      {
+        "title": "<em>国务院办公厅</em>关于<em>2024年</em>部分节假日安排的通知",
+        "url": "https://www.gov.cn/zhengce/zhengceku/202310/content_6911528.htm",
+        "pubtimeStr": "2023.10.25",
+        "pcode": "国办发明电〔2023〕7号",
+        "puborg": "国务院办公厅",
+        "totalCount": 0
+      }
+    ]
+  }
+}
