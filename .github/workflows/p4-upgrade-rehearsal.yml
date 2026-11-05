@@ -273,8 +273,11 @@ jobs:
             grep -E '\[FINDING' /tmp/rehearsal.log || echo '(无)'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload the full rehearsal log
-        if: always()
+      # 演练日志只在演练失败时需要排查；成功时 Step Summary 已经打印结论。
+      # 账号级 Artifact 配额已满时，无条件上传会让通过的升级/回滚演练整条变红。
+      # 不用 continue-on-error；本 workflow 的 gate / upgrade 名称与 needs 不变。
+      - name: Upload the full rehearsal log (only on failure)
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: p4-rehearsal-log

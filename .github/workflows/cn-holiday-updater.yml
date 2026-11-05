@@ -82,8 +82,11 @@ jobs:
           fi
           exit "$rc"
 
-      - name: Upload check report
-        if: always()
+      # 检查报告只在检查失败时保留；propose job 自己重新计算，并不读取该产物
+      # （全仓无 download-artifact）。成功时不上传，避免配额满时把 check 判红
+      # → propose 因 needs.check.result != success 而静默停止创建节假日更新 PR。
+      - name: Upload check report (only on failure)
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: cn-holiday-check-${{ github.run_id }}
