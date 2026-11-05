@@ -4226,9 +4226,17 @@ function renderLineLink() {
       ? '已过期，请重新生成。' : '请在 LINE 里向官方 Bot 发送上面的绑定码；本页会自动更新。';
     return;
   }
+  if (s.state === 'unlinking') {
+    // 解绑是通知侧异步落墓碑; 期间不给任何操作入口, 等轮询翻到 unlinked。
+    stateEl.textContent = '正在解除绑定…';
+    return;
+  }
   if (s.state === 'error') {
     stateEl.textContent = s.error || '绑定失败';
     stateEl.classList.add('is-error');
+  } else if (s.state === 'unlinked') {
+    // 与「从未绑定」区分: 明确解绑后旧服务器配置也不会恢复推送。
+    stateEl.textContent = 'LINE：未绑定（已解绑）';
   } else {
     stateEl.textContent = s.available ? 'LINE：未绑定' : 'LINE：尚未启用';
   }
@@ -4257,7 +4265,7 @@ function startLineLinkPolling() {
   stopLineLinkPolling();
   refreshLineLink();
   lineLinkTimer = setInterval(() => {
-    if (lineLinkState && (lineLinkState.state === 'pending' || lineLinkState.state === 'expired')) {
+    if (lineLinkState && ['pending', 'expired', 'unlinking'].includes(lineLinkState.state)) {
       refreshLineLink();
     }
   }, LINE_LINK_POLL_MS);
@@ -4303,7 +4311,7 @@ async function unlinkLine() {
     if (lineLinkState && lineLinkState.hash) lineLinkForgetCode(lineLinkState.hash);
     lineLinkState = data;
     renderLineLink();
-    showToast('✓ 已解除 LINE 绑定');
+    showToast('解绑请求已提交，正在生效…', 2200);
   } catch (e) { showToast('✗ 解除绑定失败', 2500); }
 }
 

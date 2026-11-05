@@ -123,7 +123,11 @@ class WebhookApp:
     def start(self):
         # 注意: PR_SET_DUMPABLE 只在真正独立的常驻进程 (main) 里做。
         # 单元测试在 pytest 进程内直接构造本类, 不该把测试进程也加固。
-        self.store.ensure()
+        self.store.ensure_trusted()
+        problem = self.store.verify_trusted_layout()
+        if problem:
+            # fail closed: 绝不在一个 Web 可写 / 属主不对的目录里写权威绑定。
+            raise line_link.TrustedLayoutError(problem)
         self.store.publish_capabilities()
         thread = threading.Thread(target=self._background, name='line-link-consumer',
                                   daemon=True)
@@ -135,6 +139,8 @@ class WebhookApp:
         last_gc = time.time()
         while not self.stop.wait(0.4):
             try:
+                # 先处理解绑请求: 之后排队的测试推送立即看到墓碑。
+                self.consume_requests()
                 self.consume_tests()
                 now = time.time()
                 if now - last_publish >= line_link.CAPABILITY_REFRESH_SECONDS:
@@ -208,7 +214,7 @@ class WebhookApp:
         """在跨进程锁内一次性完成「认领 → 校验 → 写绑定 → 写结果」。"""
         store = self.store
         now = time.time()
-        store.ensure()
+        store.ensure_trusted()
         with store.lock():
             found = store.read_code(code)
             if found is None:
@@ -245,25 +251,57 @@ class WebhookApp:
             store.set_result(code_hash, True, '', user=user, now=now)
             return 'bound'
 
+    # -- 解绑请求队列 ---------------------------------------------------
+    def consume_requests(self):
+        """通知侧**唯一**真正执行解绑的地方: 删绑定 + 写墓碑 + 取消待发测试。
+
+        Web 侧只往 inbox 写 ``unlink-*`` 请求, 从不碰权威目录。所有动作在
+        同一把跨进程锁里完成, 与 ``consume_tests`` 的认领互斥。
+        """
+        for name, _request in self.store.pending_unlink_requests():
+            with self.store.lock():
+                request = self.store.read_unlink_request(name)
+                if request is None:
+                    continue                       # 已被别的线程处理
+                user = request.get('user')
+                if not line_link.valid_user(user):
+                    self.store.drop_unlink_request(name)
+                    continue
+                self.store.apply_unlink(user)
+        return self.store.pending_unlink_requests()
+
     # -- 测试推送队列 ---------------------------------------------------
     def consume_tests(self):
-        """消费 Web 排入的测试请求。复用 LineProvider, 不碰去重状态文件。"""
+        """消费 Web 排入的测试请求。复用 LineProvider, 不碰去重状态文件。
+
+        竞态处理: 「复核绑定 + 认领请求」与解绑的 ``apply_unlink`` 用同一把
+        跨进程 flock 串行化。认领后即使紧接着解绑, ``LineProvider.send``
+        也会重新解析收件人 —— 墓碑让它 fail closed, 不会发往旧地址。
+        """
         now = time.time()
-        for rid, request in self.store.pending_test_requests():
+        for rid, _listed in self.store.pending_test_requests():
             if not line_link.REQUEST_ID_RE.fullmatch(rid):
                 self.store.drop_test_request(rid)
                 continue
-            user = request.get('user')
-            try:
-                requested_at = float(request.get('requested_at', 0))
-            except (TypeError, ValueError):
-                requested_at = 0
-            if now - requested_at > line_link.TEST_REQUEST_TTL_SECONDS:
-                self.store.set_test_result(rid, False, 'request_expired', now=now)
-                continue
-            if not line_link.valid_user(user) or self.store.binding(user) is None:
-                self.store.set_test_result(rid, False, 'not_bound', now=now)
-                continue
+            with self.store.lock():
+                request = self.store.read_test_request(rid)
+                if request is None:
+                    continue                       # 已被解绑取消
+                user = request.get('user')
+                try:
+                    requested_at = float(request.get('requested_at', 0))
+                except (TypeError, ValueError):
+                    requested_at = 0
+                if now - requested_at > line_link.TEST_REQUEST_TTL_SECONDS:
+                    self.store.set_test_result(rid, False, 'request_expired', now=now)
+                    continue
+                if (not line_link.valid_user(user)
+                        or self.store.binding(user) is None
+                        or self.store.unlinked(user) is not None):
+                    self.store.set_test_result(rid, False, 'not_bound', now=now)
+                    continue
+                self.store.claim_test_request(rid, request)
+            # 锁外调用 LINE API, 避免长时间占用跨进程锁。
             try:
                 provider = LineProvider(self.config, self.transport)
                 provider.send(user, Message('test', TEST_SUBJECT, TEST_BODY))
@@ -401,7 +439,15 @@ def main(argv=None):
         return 2
     bind = (args.bind or config.line_webhook_bind or '127.0.0.1').strip()
     port = args.port or config.line_webhook_port
-    app = build_app(config)
+    try:
+        app = build_app(config)
+    except line_link.TrustedLayoutError as exc:
+        # fail closed: 权威绑定目录归错人 / 组可写时绝不启动。
+        print(f'[line-webhook] 绑定状态目录权限自检失败，拒绝启动: {exc}',
+              file=sys.stderr)
+        print('  请按 docs/line-self-link.md §4 重建目录 (2750 / 2770) 后重启。',
+              file=sys.stderr)
+        return 2
     httpd = make_server(app, bind, port)
 
     def shutdown(*_unused):

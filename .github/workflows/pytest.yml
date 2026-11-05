@@ -71,6 +71,19 @@ jobs:
         # (替代「靠 Agent 记得同步」—— 见 AGENTS.md §4.1)
         run: bash scripts/check-ci-gates.sh
 
+      - name: Provide a real Caddy for the webhook config syntax check
+        # 只在 3.12 那个 matrix 成员下载, 避免重复三次。
+        # tests/test_caddy_webhook_config.py 会用 CADDY_BIN 真的跑
+        # caddy validate / adapt; 其它成员仍做确定性的结构检查。
+        if: matrix.python-version == '3.12'
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/caddy.tar.gz \
+            "https://github.com/caddyserver/caddy/releases/download/v2.11.9/caddy_2.11.9_linux_amd64.tar.gz"
+          tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
+          /tmp/caddy version
+          echo "CADDY_BIN=/tmp/caddy" >> "$GITHUB_ENV"
+
       - name: Run pytest
         # --basetemp 是 PR description 提到的:某些 CI sandbox file shim 对默认 /tmp 处理有 bug
         # 同时让多个 matrix 任务用各自 .pytest-tmp 不冲突

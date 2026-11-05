@@ -301,7 +301,9 @@ at all; there is no retry, no catch-up and no second chance.
 sudo useradd --system --user-group --no-create-home \
         --shell /usr/sbin/nologin y8y-notify
 sudo usermod --append --groups y8y-notify y8y
-sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
+# 已有部署: sudo chmod 3770 /var/lib/y8y-todo/notify
+# (sticky 位保护 LINE 自助绑定的权威目录, 见「LINE 自助绑定 V1」§9)
 # Apply the task ACLs and perform the controlled Web restart in
 # docs/deployment.md §5.2.6 before continuing.
 
@@ -454,13 +456,23 @@ https://todo.example.com/line/webhook
 ```
 
 **只给这一个精确路径开 Cloudflare Access 的 Bypass**，其它路径的认证策略一个字
-都不改（不要为了 Webhook 关掉整个应用的 Access）。反向代理把该路径原样转发到
-`127.0.0.1:8087`，body 不能改写 —— 签名是对原始字节算的。Caddy / nginx 的
-完整可用配置见 [docs/deployment.md §3.5](docs/deployment.md#35-为-line-webhook-开一个独立的公开入口)。
+都不改（不要为了 Webhook 关掉整个应用的 Access）。按官方《Application paths》，
+更具体的路径应用优先且不继承宽泛应用规则；但 Bypass 应用是**路径根**，会连带
+覆盖 `/line/webhook/...` 子路径，且 Bypass 请求不记 Access 日志、不施加任何
+Access 安全控制 —— 所以必须：① Caddy 只把「精确路径 + POST」转发到 `8087`，
+其余该前缀的请求直接 404；② 配 WAF Rate Limiting；③ 保留普通 API 的
+`forward_auth`。body 不能改写 —— 签名是对原始字节算的。
+
+已通过 `caddy validate` 的完整配置见
+[`packaging/Caddyfile.line-webhook.example`](packaging/Caddyfile.line-webhook.example)，
+说明见 [docs/deployment.md §3.5](docs/deployment.md#35-为-line-webhook-开一个独立的公开入口)。
+⚠️ Caddy 的 `header_up` 必须写在 `reverse_proxy { ... }` **块内**（它是
+`reverse_proxy` 的子指令），放在 `handle` 里配置根本起不来。
 
 ### 4. 启用自助绑定（新增一个常驻服务）
 
 ```bash
+# 0. 先按 §9 建立 3770 / 2750 / 2770 三级目录
 sudo cp /opt/y8y-todo/packaging/y8y-todo-line-webhook.service \
         /etc/systemd/system/y8y-todo-line-webhook.service
 sudo systemctl daemon-reload
@@ -468,13 +480,16 @@ sudo systemctl enable --now y8y-todo-line-webhook.service
 ```
 
 已有的 `y8y-todo.service`、`y8y-todo-notify.timer` **不用改**。Webhook 服务只监听
-回环、只接受 `POST /line/webhook`，其它路径一律 404。
+回环、只接受 `POST /line/webhook`，其它路径一律 404；启动时会自检权威目录的
+属主与权限，不合格就拒绝启动（fail closed）。
 
 ### 5. 验证 Webhook
 
 ```bash
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile   # Valid configuration
 sudo systemctl status y8y-todo-line-webhook.service
 curl -i -X POST https://todo.example.com/line/webhook -d '{}'   # 期望 401（缺签名）
+curl -i https://todo.example.com/line/webhook/anything           # 期望 404
 # LINE Developers → Webhook → 「Verify」应为 Success
 # 另开一个路径确认 Access 仍然生效：
 curl -i https://todo.example.com/todo/api/tasks                 # 应被 Access 拦截
@@ -492,40 +507,63 @@ curl -i https://todo.example.com/todo/api/tasks                 # 应被 Access 
 ### 7. 测试推送与解绑
 
 已连接后点「发送测试通知」—— 固定文本，只能发给当前用户已绑定的 LINE 账号，
-60 秒最多 1 条、1 小时最多 5 条。点「解除绑定」立刻停止；点「更换 LINE 账号」
-可以直接重新绑定另一个 LINE 账号。
+60 秒最多 1 条、1 小时最多 5 条。点「解除绑定」后网页显示「正在解除绑定」，
+约 0.4 秒后变成「未绑定（已解绑）」：通知侧会写一条**持久化解绑墓碑**，
+因此旧服务器配置也**不会**自动恢复向原 LINE 地址推送。排队中尚未发送的
+测试通知会被取消。点「更换 LINE 账号」可直接重新绑定另一个 LINE 账号，
+重新绑定成功后墓碑清除、通知恢复。
 
 ### 8. 已有的 `Y8Y_NOTIFY_LINE_TARGETS` 怎么办
 
-**优先级固定**：有自助绑定 → 用它；没有 → 回退到旧环境变量。所以升级后旧用户
-**不会突然收不到通知**。
+**优先级固定**：
 
-两者指向不同 LINE 账号时不会静默二选一：默认 `binding` 以用户自助绑定为准，
-并把冲突写进能力表、在设置页显示提示；设
-`Y8Y_NOTIFY_LINE_CONFLICT_POLICY=strict` 则该用户停发，直到管理员移除旧条目。
-建议每个用户自助绑定成功并测试通过后，管理员再从 env 里删掉该用户的
-`user=Uxxxx` 条目并重启 Webhook 服务。详见
+1. 有自助绑定 → 用它；
+2. **明确解绑过**（有墓碑）→ 停发，**不回退**旧环境变量；
+3. 从未绑定 → 回退到旧环境变量（升级兼容，旧用户不会突然收不到通知）。
+
+第 2 条保证「解除绑定」的语义不会被旧配置悄悄推翻。两者指向不同 LINE 账号
+时不会静默二选一：默认 `binding` 以用户自助绑定为准，并把冲突写进能力表、
+在设置页显示提示；设 `Y8Y_NOTIFY_LINE_CONFLICT_POLICY=strict` 则该用户停发，
+直到管理员移除旧条目。建议每个用户自助绑定成功并测试通过后，管理员再从 env
+里删掉该用户的 `user=Uxxxx` 条目并重启 Webhook 服务。详见
 [docs/line-self-link.md §8](docs/line-self-link.md#8-旧-y8y_notify_line_targets-的迁移)。
 
-### 9. 数据与备份
+### 9. 数据、权限与备份
 
-绑定数据位于 `<data>/notify/line-link/`（每个用户一个小 JSON，不含凭据），
-跟着数据目录一起备份即可。目录需 `2770`、属组 `y8y-notify`，`y8y` 是组成员：
+数据分成**两级目录**，权限就是安全边界（Web 绝不能写权威绑定文件）：
+
+| 目录 | 权限 | 内容 |
+| --- | --- | --- |
+| `<notify>/` | `3770`（setgid + **sticky**） | 原有三个通知 JSON；sticky 阻止 Web 挪走通知侧拥有的目录 |
+| `<notify>/line-link/` | `2750` | **权威**：`binding-*`、解绑墓碑 `unlinked-*`、`capabilities.json`（Web 只读） |
+| `<notify>/line-link-inbox/` | `2770` | 请求队列：绑定码、解绑请求、测试通知（Web 可写） |
 
 ```bash
-sudo install -d -o y8y-notify -g y8y-notify -m 2770 \
+sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
+sudo chmod 3770 /var/lib/y8y-todo/notify            # 已有目录补 sticky
+sudo install -d -o y8y-notify -g y8y-notify -m 2750 \
         /var/lib/y8y-todo/notify/line-link
+sudo install -d -o y8y-notify -g y8y-notify -m 2770 \
+        /var/lib/y8y-todo/notify/line-link-inbox
 ```
+
+创建 / 替换 / 删除文件只需要**父目录写权限**，所以 `2750` 的权威目录从根上
+挡住了「Web 伪造 / 替换 / 删除绑定」；通知侧启动还会自检属主与权限，
+不合格就**拒绝启动**。跟着 `<data_dir>` 一起备份即可；恢复后按上表重建目录
+权限。跨 UID 的真实演练见 [docs/line-self-link.md §4](docs/line-self-link.md#4-数据文件与权限p0-2-核心)。
 
 ### 10. 常见错误
 
 | 现象 | 处理 |
 | --- | --- |
 | 按钮显示「尚未启用」 | Webhook 服务没跑 / 能力表超过 5 分钟没更新 / 状态目录权限不对 |
-| 发了码一直「等待确认」 | 是否在群聊里发的；Access 是否只放行 `/line/webhook`；代理是否改写了 body |
+| journal 出现「绑定状态目录权限自检失败」 | 按 §9 重建三级目录（服务会 fail closed，不会带病启动） |
+| 发了码一直「等待确认」 | 是否在群聊里发的；Access 是否只放行 `/line/webhook`；Caddy 的 `header_up` 是否写在 `reverse_proxy` 块内（否则配置根本起不来）；代理是否改写了 body |
 | Verify 失败 | Channel Secret 填错、`X-Line-Signature` 被剥掉、body 被重序列化 |
 | 「LINE 账号已绑定其他用户」 | 一个 LINE 账号只能绑一个 Todo 用户，让对方先解绑 |
 | 「旧配置已被忽略」 | 按 §8 移除该用户的旧 env 条目 |
+| 解绑后卡在「正在解除绑定…」 | Webhook 服务没在跑或写不了 `line-link/`；看 journal 与目录属主 |
+| 普通 API 不再要求认证 | 检查 Cloudflare Access 是否误给整站开了 Bypass；Caddy 的兜底 `handle` 必须保留 `forward_auth` |
 
 完整排错表见 [docs/line-self-link.md §10](docs/line-self-link.md#10-常见错误与排查)。
 

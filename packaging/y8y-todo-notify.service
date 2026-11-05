@@ -40,7 +40,8 @@
 #   sudo useradd --system --user-group --no-create-home \
 #           --shell /usr/sbin/nologin y8y-notify
 #   sudo usermod --append --groups y8y-notify y8y
-#   sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+#   sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
+#   (sticky 位保护 LINE 自助绑定的权威目录; 见 docs/line-self-link.md §4)
 #   Apply task ACLs and restart Web in a controlled window: docs/deployment.md §5.2.6
 #
 # 想先看看会发什么 (不发送):

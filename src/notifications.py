@@ -988,7 +988,13 @@ class LineProvider(Provider):
         return bool(bound and legacy and bound != legacy)
 
     def target_for(self, user):
-        """收件人优先级: 自助绑定 > 旧环境变量 (只作未绑定用户的回退)。
+        """收件人优先级: 自助绑定 > **明确解绑后停发** > 旧环境变量。
+
+        ``Y8Y_NOTIFY_LINE_TARGETS`` 只服务两类人: 升级后从未自助绑定过的
+        老用户, 以及绑定已解除但**从未明确解绑**的历史状态 (不存在)。
+        一旦用户点过「解除绑定」, 通知侧会写一条持久化的
+        ``unlinked-<hash>.json`` 墓碑 —— 这里看到墓碑就直接返回空串,
+        **绝不自动恢复向旧 LINE 地址推送** (P0-1)。
 
         冲突时的处理由 ``Y8Y_NOTIFY_LINE_CONFLICT_POLICY`` 决定, 且一定
         **可见**: 能力表里的 ``line_conflicts`` 会让 Web 界面显示冲突提示。
@@ -998,7 +1004,11 @@ class LineProvider(Provider):
         if bound and legacy and bound != legacy:
             if getattr(self.config, 'line_conflict_policy', 'binding') == 'strict':
                 return ''
-        return bound or legacy or ''
+        if bound:
+            return bound
+        if self._links.unlinked(user) is not None:
+            return ''
+        return legacy or ''
 
     def send(self, user, message):
         if self.conflict_for(user) and \

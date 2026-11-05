@@ -22,6 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'src'))
 import line_link                                                      # noqa: E402
+import line_webhook                                                   # noqa: E402
 
 HEADED = '--headed' in sys.argv
 SHOTS = None
@@ -136,14 +137,42 @@ def main():
             check('更换按钮可见', page.locator('#lineLinkRebindBtn').is_visible())
             shot(page, '03-bound')
 
-            print('== 解绑 ==')
+            print('== 解绑 (Web 只排队, 通知侧写墓碑) ==')
             page.on('dialog', lambda d: d.accept())
             page.locator('#lineLinkUnlinkBtn').click()
+            page.wait_for_function(
+                "document.getElementById('lineLinkState').textContent.includes('正在解除绑定')",
+                timeout=8000)
+            check('解绑进入过渡态',
+                  '正在解除绑定' in page.locator('#lineLinkState').inner_text())
+            check('Web 只写了请求, 权威绑定仍在', store.binding('dev') is not None)
+            check('Web 没有写解绑墓碑', store.unlinked('dev') is None)
+
+            # 模拟常驻 Webhook 服务的后台线程消费解绑请求
+            from notifications import NotifyConfig
+            cfg = NotifyConfig({
+                'Y8Y_DATA_DIR': str(data),
+                'Y8Y_NOTIFY_LINE_CHANNEL_SECRET': 'fake-secret-for-browser-test',
+                'Y8Y_NOTIFY_LINE_TOKEN': 'fake-token-for-browser-test',
+            })
+            app = line_webhook.WebhookApp(cfg, store=store)
+            app.stop.set()
+            app.consume_requests()
+
             page.locator('#lineLinkUnboundActions').wait_for(state='visible', timeout=8000)
-            check('解绑后回到未绑定',
-                  '未绑定' in page.locator('#lineLinkState').inner_text(),
-                  page.locator('#lineLinkState').inner_text())
+            page.wait_for_function(
+                "document.getElementById('lineLinkState').textContent.includes('已解绑')",
+                timeout=8000)
+            state_text = page.locator('#lineLinkState').inner_text()
+            check('解绑后显示为「已解绑」而非「从未绑定」', '已解绑' in state_text,
+                  state_text)
+            check('界面提示旧配置不会恢复',
+                  '不会再' in page.locator('#lineLinkHint').inner_text(),
+                  page.locator('#lineLinkHint').inner_text())
             check('服务端绑定已删除', store.binding('dev') is None)
+            check('服务端写入持久解绑墓碑', store.unlinked('dev') is not None)
+            check('手机/桌面端可重新绑定',
+                  page.locator('#lineLinkStartBtn').is_enabled())
 
             print('== 手机视口 (390x844) ==')
             page.wait_for_timeout(2600)                # 等解绑 toast 消失

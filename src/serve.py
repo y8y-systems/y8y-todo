@@ -141,6 +141,12 @@ def line_link_status(user):
     )
     if not status['available']:
         status['hint'] = '服务器尚未启用 LINE 自助绑定（请联系管理员部署 Webhook 服务）。'
+    elif status['state'] == 'unlinking':
+        status['hint'] = '正在解除绑定，请稍候。'
+    elif status['state'] == 'unlinked':
+        # 关键: 明确解绑后旧环境变量里的收件人不会被自动恢复。
+        status['hint'] = ('已解除绑定。服务器旧的 LINE 配置不会再向你推送；'
+                          '重新绑定后才会恢复通知。')
     elif status['legacy_conflict']:
         status['hint'] = ('自助绑定已生效；旧的 LINE 环境变量配置与它指向不同账号，'
                           '已被忽略。建议管理员移除旧配置。')
@@ -1098,6 +1104,10 @@ class TodolistHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json({'error': '该账号已绑定 LINE，请先解除绑定或选择「更换」。',
                                  'state': 'bound'}, 409)
                 return
+            if current['state'] == 'unlinking':
+                self._send_json({'error': '正在解除绑定，请稍后再试。',
+                                 'state': 'unlinking'}, 409)
+                return
             payload, err = LINE_LINK_STORE.create_code(
                 user, replace=replace, bot_id=CONFIG.line_bot_id)
             if err:
@@ -1740,9 +1750,10 @@ class TodolistHandler(http.server.BaseHTTPRequestHandler):
             self._send_error('Unauthorized', 401)
             return
 
-        # API: 解除 LINE 绑定 (只能删自己的)
+        # API: 提出解绑请求 (只能解绑自己)。Web 只往 inbox 写请求,
+        # 权威绑定/墓碑由通知侧 Webhook 服务写入 —— 见 line_link.py。
         if path == '/todo/api/line-link':
-            LINE_LINK_STORE.unlink(user)
+            LINE_LINK_STORE.request_unlink(user)
             self._send_json(line_link_status(user))
             return
 

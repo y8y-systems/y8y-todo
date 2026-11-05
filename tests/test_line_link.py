@@ -108,6 +108,13 @@ def _bind(store, code, line_id, event_id=None):
     return app.handle_event(_event(code, line_id=line_id, event_id=event_id))
 
 
+def _apply_unlink(store):
+    """模拟通知侧后台线程消费解绑请求 (Web 只负责排队)。"""
+    app, sink, config = _app(store.data_dir)
+    app.consume_requests()
+    return app, sink, config
+
+
 def _create_code(client, headers=ALICE, replace=False):
     status, body = client.post('/todo/api/line-link', {'replace': replace},
                                headers=headers)
@@ -209,10 +216,13 @@ def test_user_a_binds_line_via_web_then_webhook(server):
 def test_raw_binding_code_is_never_written_to_disk(server):
     _serve, _httpd, client, tmp = server
     code, _hash = _create_code(client)
-    state_dir = line_link.LinkStore(str(tmp / 'data')).state_dir
-    for name in os.listdir(state_dir):
-        text = (Path(state_dir) / name).read_text(encoding='utf-8', errors='replace')
-        assert code not in text, f'{name} 落盘了原始绑定码'
+    store = line_link.LinkStore(str(tmp / 'data'))
+    for directory in (store.state_dir, store.inbox_dir):
+        if not os.path.isdir(directory):
+            continue
+        for name in os.listdir(directory):
+            text = (Path(directory) / name).read_text(encoding='utf-8', errors='replace')
+            assert code not in text, f'{name} 落盘了原始绑定码'
 
 
 def test_user_b_binds_a_different_line(server):
@@ -317,12 +327,18 @@ def test_unlink_stops_sending_to_the_old_line(server):
     code, _ = _create_code(client)
     _bind(store, code, LINE_A)
     config = _config(data)
-    provider = LineProvider(config)
-    assert provider.target_for('alice') == LINE_A
+    assert LineProvider(config).target_for('alice') == LINE_A
 
     status, body = client.delete('/todo/api/line-link', headers=ALICE)
-    assert status == 200 and body['state'] == 'unbound'
+    assert status == 200 and body['state'] == 'unlinking'
+    # 解绑请求只是排队: 绑定记录仍然由通知侧独占, Web 碰不到。
+    assert store.binding('alice') is not None
+    assert store.has_unlink_request('alice') is True
+
+    _apply_unlink(store)
     assert store.binding('alice') is None
+    assert store.unlinked('alice') is not None
+    assert client.get('/todo/api/line-link', headers=ALICE)[1]['state'] == 'unlinked'
     assert LineProvider(config).target_for('alice') == ''
     assert client.post('/todo/api/line-test', {}, headers=ALICE)[0] == 409
     caps_path = Path(tmp / 'data') / 'notify' / 'notification_channels.json'
@@ -338,6 +354,7 @@ def test_rebind_to_another_line_restores_notifications(server):
     code, _ = _create_code(client)
     _bind(store, code, LINE_A)
     client.delete('/todo/api/line-link', headers=ALICE)
+    _apply_unlink(store)
     code2, _ = _create_code(client)
     assert _bind(store, code2, LINE_B) == 'bound'
     assert store.binding('alice')['line_user_id'] == LINE_B
@@ -403,6 +420,121 @@ def test_strict_conflict_policy_fails_closed(tmp_path):
     assert '冲突' in str(exc.value)
 
 
+# ── P0-1: 明确解绑 ≠ 从未绑定 ────────────────────────────────────────
+def test_explicit_unlink_never_falls_back_to_legacy_target(server):
+    """回归: 解绑后旧 Y8Y_NOTIFY_LINE_TARGETS 绝不能被自动恢复。"""
+    _serve, _httpd, client, tmp = server
+    data = tmp / 'data'
+    store = line_link.LinkStore(str(data))
+    code, _ = _create_code(client)
+    assert _bind(store, code, LINE_B) == 'bound'
+    config = _config(data, Y8Y_NOTIFY_LINE_TARGETS='alice=' + LINE_A)
+    assert LineProvider(config).target_for('alice') == LINE_B
+
+    client.delete('/todo/api/line-link', headers=ALICE)
+    _apply_unlink(store)
+
+    assert store.binding('alice') is None
+    assert store.unlinked('alice') is not None
+    assert LineProvider(config).target_for('alice') == ''
+    assert LineProvider(config).available_for('alice') is False
+    assert client.post('/todo/api/line-test', {}, headers=ALICE)[0] == 409
+    status = client.get('/todo/api/line-link', headers=ALICE)[1]
+    assert status['state'] == 'unlinked' and status['legacy_disabled'] is True
+    assert '不会再' in status['hint']
+
+
+def test_unlink_blocks_legacy_fallback_under_both_conflict_policies(tmp_path):
+    for policy in ('binding', 'strict'):
+        data = tmp_path / ('data-' + policy)
+        store = line_link.LinkStore(str(data))
+        store.ensure()
+        store.set_binding('alice', LINE_B, now=time.time())
+        store.apply_unlink('alice')
+        config = _config(data, Y8Y_NOTIFY_LINE_TARGETS='alice=' + LINE_A,
+                         Y8Y_NOTIFY_LINE_CONFLICT_POLICY=policy)
+        assert LineProvider(config).target_for('alice') == '', policy
+
+
+def test_never_bound_user_keeps_legacy_target_after_upgrade(tmp_path):
+    """升级兼容: 从未自助绑定过的老用户仍靠旧环境变量收通知。"""
+    data = tmp_path / 'data'
+    store = line_link.LinkStore(str(data))
+    store.ensure()
+    assert store.unlinked('alice') is None
+    config = _config(data, Y8Y_NOTIFY_LINE_TARGETS='alice=' + LINE_A)
+    assert LineProvider(config).target_for('alice') == LINE_A
+    assert LineProvider(config).available_for('alice') is True
+    # 另一个用户明确解绑, 不影响这位老用户
+    store.apply_unlink('bob')
+    assert LineProvider(config).target_for('alice') == LINE_A
+
+
+def test_unlink_tombstone_is_persistent_and_rebind_clears_it(server):
+    """墓碑跨进程可见; 只有重新绑定成功才清除。"""
+    _serve, _httpd, client, tmp = server
+    data = tmp / 'data'
+    store = line_link.LinkStore(str(data))
+    code, _ = _create_code(client)
+    _bind(store, code, LINE_A)
+    client.delete('/todo/api/line-link', headers=ALICE)
+    _apply_unlink(store)
+
+    # 全新的 LinkStore 实例 (模拟调度器另一个进程) 仍能看到墓碑
+    other_process = line_link.LinkStore(str(data))
+    assert other_process.unlinked('alice') is not None
+    assert line_link.explicitly_unlinked(str(data), 'alice') is True
+    config = _config(data, Y8Y_NOTIFY_LINE_TARGETS='alice=' + LINE_A)
+    assert LineProvider(config).target_for('alice') == ''
+    # 网页状态与 HTTP 服务重启无关
+    assert client.get('/todo/api/line-link', headers=ALICE)[1]['state'] == 'unlinked'
+
+    code2, _ = _create_code(client)
+    assert _bind(store, code2, LINE_C) == 'bound'
+    assert other_process.unlinked('alice') is None
+    assert LineProvider(config).target_for('alice') == LINE_C
+
+
+def test_unlink_cancels_queued_test_notification(server):
+    """竞态: 解绑时已排队但尚未发送的测试通知不能发往旧 LINE 地址。"""
+    _serve, _httpd, client, tmp = server
+    data = tmp / 'data'
+    store = line_link.LinkStore(str(data))
+    code, _ = _create_code(client)
+    _bind(store, code, LINE_A)
+    req = client.post('/todo/api/line-test', {}, headers=ALICE)
+    assert req[0] == 200
+    rid = req[1]['request_id']
+
+    # 用户紧接着解绑; 通知侧在同一个锁里取消待发测试。
+    client.delete('/todo/api/line-link', headers=ALICE)
+    app, sink, _cfg = _apply_unlink(store)
+
+    assert sink == []                                   # 一次 LINE API 都没调用
+    assert app.consume_tests() == []                    # 队列已被清空
+    result = client.get(f'/todo/api/line-test?id={rid}', headers=ALICE)[1]
+    assert result['state'] == 'error'
+    assert result['error'] == line_link.ERROR_MESSAGES['cancelled']
+    assert LineProvider(_config(data, Y8Y_NOTIFY_LINE_TARGETS='alice=' + LINE_A))\
+        .target_for('alice') == ''
+
+
+def test_send_rechecks_binding_after_claim_so_unlink_wins(tmp_path):
+    """认领后、调用 LINE API 前解绑 → send() 重新解析收件人并 fail closed。"""
+    data = tmp_path / 'data'
+    store = line_link.LinkStore(str(data))
+    store.ensure()
+    store.set_binding('alice', LINE_A, now=time.time())
+    config = _config(data, Y8Y_NOTIFY_LINE_TARGETS='alice=' + LINE_A)
+    sink = []
+    provider = LineProvider(config, _transport(sink))
+    store.apply_unlink('alice')                       # 墓碑先落地
+    with pytest.raises(ProviderError):
+        provider.send('alice', notifications.Message('test', 's', 'body'))
+    assert sink == []
+    assert LINE_A not in json.dumps(sink)
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 3. 安全
 # ══════════════════════════════════════════════════════════════════════
@@ -424,9 +556,12 @@ def test_user_a_cannot_see_or_modify_b(server):
     assert status == 200 and body['state'] == 'unbound'
     assert 'line_user_masked' not in body
     assert LINE_A not in json.dumps(body)
-    # Bob 的解绑不能动 Alice 的绑定
+    # Bob 的解绑请求即使被通知侧消费, 也不能动 Alice 的绑定
     assert client.delete('/todo/api/line-link', headers=BOB)[0] == 200
+    _apply_unlink(store)
     assert store.binding('alice')['line_user_id'] == LINE_A
+    assert store.unlinked('alice') is None
+    assert store.unlinked('bob') is not None
     # 测试推送结果也不能被别人查
     req = client.post('/todo/api/line-test', {}, headers=ALICE)[1]
     assert client.get(f"/todo/api/line-test?id={req['request_id']}",
@@ -438,7 +573,7 @@ def test_expired_code_cannot_be_used(server):
     store = line_link.LinkStore(str(tmp / 'data'))
     code, code_hash = _create_code(client)
     # 模拟 11 分钟过去: 直接把该文件的时间戳改到过去 (确定性, 不 sleep)
-    path = Path(store.state_dir) / f'code-{code_hash}.json'
+    path = Path(store._path(f'code-{code_hash}.json'))
     record = json.loads(path.read_text(encoding='utf-8'))
     record['expires_at'] = time.time() - 1
     atomic_write(str(path), json.dumps(record))
@@ -728,7 +863,10 @@ def test_binding_data_is_not_a_public_static_resource(server):
     # 未知路径会走 SPA fallback (返回 index.html, 200), 但**绝不能**把
     # 数据目录里的绑定文件/能力表内容带出来。
     for path in ('/line-link-capabilities.json', '/line-link/code-abc.json',
-                 '/notify/line-link/binding-x.json', '/serve.py',
+                 '/notify/line-link/capabilities.json',
+                 '/notify/line-link/binding-x.json',
+                 '/notify/line-link/unlinked-x.json',
+                 '/notify/line-link-inbox/code-x.json', '/serve.py',
                  '/../data/notify/line-link/binding-x.json'):
         _status, body = client.get(path)
         raw = json.dumps(body, ensure_ascii=False)

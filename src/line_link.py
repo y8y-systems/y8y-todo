@@ -4,32 +4,58 @@
 被两个进程导入:
 
 * ``serve.py``         (Web, 系统用户 ``y8y``): 生成一次性绑定码、查询状态、
-  解绑、把「发送测试通知」排进队列。
+  **提出**解绑请求、把「发送测试通知」排进队列。
 * ``line_webhook.py``  (Webhook, 系统用户 ``y8y-notify``): 校验 LINE 签名后
-  兑换绑定码、写入绑定关系、消费测试推送队列。
+  兑换绑定码、**独占写入**绑定关系、消费解绑请求与测试推送队列。
 
 本模块**不读取任何长期凭据**: 不碰 Channel Access Token, 也不碰 Channel
-Secret。它连 ``Y8Y_NOTIFY_*`` 变量名都不出现在代码里 —— 这是刻意的,
-``tests/test_line_link.py`` 会钉死这一点。
+Secret。代码里不出现任何凭据环境变量名 —— 这是刻意的,
+``tests/test_line_link.py`` 会静态钉死这一点。(文档里提到旧配置名
+``Y8Y_NOTIFY_LINE_TARGETS`` 只是说明优先级, 它不是凭据, 也没有被读取。)
 
-两个进程通过 ``<data_dir>/notify/line-link/`` 下的**单写者小文件**交换
-状态, 没有跨账号的 read-modify-write:
+## 两级目录 (P0-2: 权威绑定记录只能由通知侧写)
 
-===========================  =========  ===============================
-文件名                       写者       内容 / 用途
-===========================  =========  ===============================
-``code-<hash>.json``         Web        一次性绑定码 (只存 sha256, 不存原文)
-``result-<hash>.json``       Webhook    绑定结果 (成功 / 固定错误码)
-``binding-<hash>.json``      Webhook    Todo 用户 ↔ LINE User ID
-``test-<id>.req.json``       Web        测试推送请求
-``test-<id>.res.json``       Webhook    测试推送结果
-``event-<hash>.json``        Webhook    已处理的 webhookEventId (重放去重)
-``test-rate.json``           Web        测试推送的每用户频率计数
-===========================  =========  ===============================
+``<data>/notify/`` 是 3770 (setgid + **sticky**) 共享目录。sticky 位保证
+Web 账号 (``y8y``) 只能删除/改名**自己拥有的**条目, 不能把通知侧拥有的
+``line-link/`` 整个挪走再伪冒一个。
+
+```
+<data>/notify/
+  line-link/                 2750  y8y-notify:y8y-notify   ← Web 只有 r-x
+    binding-<hash>.json     webhook 写  最终生效的绑定
+    unlinked-<hash>.json    webhook 写  解绑墓碑 (禁止回退旧地址)
+    result-<hash>.json      webhook 写  绑定结果
+    event-<hash>.json       webhook 写  事件去重
+    capabilities.json       webhook 写  在线标记
+  line-link-inbox/           2770  y8y-notify:y8y-notify   ← Web + webhook 都可写
+    code-<hash>.json        Web 写   一次性绑定码 (只存 sha256)
+    unlink-<hash>.json      Web 写   解绑**请求** (不是权威记录)
+    test-<id>.req.json      Web 写   测试推送请求
+    test-<id>.claim.json    webhook 写 已认领的请求 (防竞态)
+    test-<id>.res.json      webhook 写 测试推送结果
+    test-rate.json          Web 写   频率计数
+    lock                    两者     flock 协调文件 (非权限边界)
+```
+
+目录权限是**唯一**保证「Web 不能删/换/伪造 binding 记录」的机制:
+创建、改名、替换一个文件都需要**父目录的写权限**, 而 Web 对
+``line-link/`` 没有写权限 (2750)。Web 仍能读 0644 的绑定文件来显示自己的
+状态 —— 应用层的按用户隔离由 ``status(user)`` 保证。
+
+此外通知侧启动时会调 ``verify_trusted_layout()`` 自检: 权威目录必须是
+真实目录、归自己所有、且 group/other 不可写 —— 不满足就 **fail closed**
+拒绝启动, 防止运维漏配或有人预先抢占目录名。
+
+## 解绑墓碑 (P0-1)
+
+解绑不删文件了事: Web 只在 inbox 里放一个 ``unlink-*`` 请求, 由通知侧
+写一条持久化的 ``unlinked-*`` 墓碑。``LineProvider.target_for()`` 看到墓碑
+就**不再回退** ``Y8Y_NOTIFY_LINE_TARGETS``; 只有「从未绑定」的用户才用旧
+环境变量 (升级兼容)。重新绑定成功时墓碑被清除。
 
 文件名里的 ``<hash>`` 一律是 ``sha256`` 十六进制串, 用户输入永远不会
 直接进文件名 (路径穿越 / 覆盖都不可能)。需要「读 + 判断 + 写」原子性的
-操作统一在 ``LinkStore.lock()`` (同目录 flock 文件) 里完成 —— flock 对
+操作统一在 ``LinkStore.lock()`` (inbox 里的 flock 文件) 里完成 —— flock 对
 只读 fd 也生效, 所以 0644 的锁文件两个账号都能打开。
 
 所有文件都在数据目录里, **不在源码静态目录**, 因此不会被 Web 的静态
@@ -41,6 +67,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import threading
 import time
 
@@ -55,8 +82,21 @@ from taskstore import atomic_write
 # notifications (那边会 import 本模块), 由测试钉死两个常量相等。
 NOTIFY_DIR_NAME = 'notify'
 STATE_DIR_NAME = 'line-link'
-CAPABILITIES_FILE = 'line-link-capabilities.json'
+#: 与 state_dir **平级**: Web 的 ensure() 不该顺手把权威目录建出来
+#: (os.makedirs 建中间目录时用默认 0755, 那样 Web 就成了它的属主)。
+INBOX_DIR_NAME = 'line-link-inbox'
+CAPABILITIES_FILE = 'capabilities.json'
 CAPABILITIES_VERSION = 1
+
+#: 通知状态目录: setgid + sticky + group rwx (Web 不能挪走通知侧的目录)。
+NOTIFY_DIR_MODE = 0o3770
+#: 权威状态目录: setgid + owner rwx + group r-x (Web 只读, 不能建/删/换文件)。
+TRUSTED_DIR_MODE = 0o2750
+#: 请求队列目录: setgid + owner/group rwx (两个账号都能建/删自己的文件)。
+INBOX_DIR_MODE = 0o2770
+
+#: 前缀 → 权威目录。其余一律落在 inbox。
+TRUSTED_PREFIXES = ('binding-', 'unlinked-', 'result-', 'event-', 'capabilities')
 
 #: 绑定码: 24 字节安全随机数 → 32 个 URL-safe 字符 (192 bit), 10 分钟有效。
 CODE_TTL_SECONDS = 600
@@ -97,12 +137,17 @@ ERROR_MESSAGES = {
     'rate_limited': '测试通知发送太频繁，请稍后再试。',
     'send_failed': '测试通知发送失败，请检查 LINE 凭据与网络。',
     'request_expired': '请求已超时，请重试。',
+    'cancelled': '已解除 LINE 绑定，本次测试通知已取消。',
     'forbidden': '无权查看这次测试。',
     'unknown_request': '请求不存在或已过期。',
     'not_configured': '服务器尚未启用 LINE 自助绑定，请联系管理员。',
 }
 
 _LOCAL_LOCK = threading.RLock()
+
+
+class TrustedLayoutError(RuntimeError):
+    """权威状态目录不满足最小权限要求 —— 通知侧必须拒绝启动 (fail closed)。"""
 
 
 # ── 小工具 ────────────────────────────────────────────────────────────
@@ -146,41 +191,103 @@ def deep_link(bot_id):
     return 'https://line.me/R/ti/p/' + (raw if raw.startswith('@') else '@' + raw)
 
 
+def _touch_dir(path, mode):
+    """创建目录并尽力把权限**精确**钉死 (跨账号时改不了就忽略)。
+
+    不用「按位或补缺」: 那样一个 0755 的目录会变成 2755 (other 仍有 r-x),
+    达不到 2750 的收紧效果。生产环境由 Operator 预先用 ``install -d`` 建好;
+    这里是开发/单机以及通知侧自身启动时的兜底。
+    """
+    os.makedirs(path, mode=mode, exist_ok=True)
+    try:
+        current = os.stat(path).st_mode & 0o7777
+        if current != mode:
+            os.chmod(path, mode)
+    except OSError:
+        pass
+    return path
+
+
 # ── 状态存储 ──────────────────────────────────────────────────────────
 class LinkStore:
-    """``<data_dir>/notify/line-link/`` 的读写封装。
+    """``<data>/notify/line-link/`` (权威) + ``.../inbox/`` (请求队列)。
 
-    构造**不创建任何目录**: 通知调度器 (只读绑定关系) 与 Web 的能力表
-    查询都不该顺手造目录。要写的时候显式调 ``ensure()``。
+    构造**不创建任何目录**: 通知调度器与 Web 的状态查询都是只读的。
     """
 
     def __init__(self, data_dir):
         self.data_dir = str(data_dir or '')
         self.notify_dir = os.path.join(self.data_dir, NOTIFY_DIR_NAME)
         self.state_dir = os.path.join(self.notify_dir, STATE_DIR_NAME)
-        self.caps_path = os.path.join(self.notify_dir, CAPABILITIES_FILE)
+        self.inbox_dir = os.path.join(self.notify_dir, INBOX_DIR_NAME)
+        self.caps_path = os.path.join(self.state_dir, CAPABILITIES_FILE)
+        self.lock_path = os.path.join(self.inbox_dir, 'lock')
 
     # -- 目录 / 锁 ------------------------------------------------------
+    @staticmethod
+    def _dir_for(name):
+        return 'trusted' if name.startswith(TRUSTED_PREFIXES) else 'inbox'
+
+    def _path(self, name):
+        base = self.state_dir if self._dir_for(name) == 'trusted' else self.inbox_dir
+        return os.path.join(base, name)
+
     def ensure(self):
-        """确保共享目录存在且 setgid + 组可写 (两个服务账号都要能建/删文件)。"""
-        os.makedirs(self.state_dir, mode=0o2770, exist_ok=True)
-        try:
-            mode = os.stat(self.state_dir).st_mode
-            needed = 0o2070                       # setgid + group rwx
-            if (mode & needed) != needed:
-                os.chmod(self.state_dir, (mode & 0o7777) | needed)
-        except OSError:
-            # 目录归另一个服务账号所有时改不了权限 —— 部署脚本已经建好它了,
-            # 这里只是开发/单机环境的兜底, 失败不影响读写。
-            pass
+        """Web 侧可安全调用: 只保证 notify/ 与 inbox/ 存在, **绝不创建权威目录**。"""
+        _touch_dir(self.notify_dir, NOTIFY_DIR_MODE)
+        _touch_dir(self.inbox_dir, INBOX_DIR_MODE)
+        return self.inbox_dir
+
+    def ensure_trusted(self):
+        """通知侧专用: 创建并加固权威目录 (2750), 顺便保证 inbox 存在。"""
+        self.ensure()
+        _touch_dir(self.state_dir, TRUSTED_DIR_MODE)
         return self.state_dir
+
+    def verify_trusted_layout(self, uid=None):
+        """通知侧启动自检 —— 返回空串表示 OK, 否则给出**脱敏**的失败原因。
+
+        fail closed: 权威目录必须由本进程自己拥有, 且 group/other 不可写。
+        这样即使有人抢先建了同名目录、或运维漏了 chmod, Webhook 服务也不会
+        在一个 Web 可写的目录里写绑定记录。
+        """
+        uid = os.geteuid() if uid is None else uid
+        try:
+            parent = os.lstat(self.notify_dir)
+        except OSError:
+            return 'notification state directory is missing'
+        # 没有 sticky 的话, Web 可以把通知侧拥有的 line-link/ 整个改名再伪冒一个。
+        if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode):
+            return 'notification state directory is not a directory'
+        if not (parent.st_mode & stat.S_ISVTX):
+            return 'notification state directory lost its sticky bit'
+        try:
+            info = os.lstat(self.state_dir)
+        except OSError:
+            return 'trusted state directory is missing'
+        if stat.S_ISLNK(info.st_mode):
+            return 'trusted state directory is a symlink'
+        if not stat.S_ISDIR(info.st_mode):
+            return 'trusted state directory is not a directory'
+        if info.st_uid != uid:
+            return 'trusted state directory is owned by a different uid'
+        if info.st_mode & 0o022:
+            return 'trusted state directory is group/other writable'
+        try:
+            inbox = os.lstat(self.inbox_dir)
+        except OSError:
+            return 'request inbox is missing'
+        if not stat.S_ISDIR(inbox.st_mode) or stat.S_ISLNK(inbox.st_mode):
+            return 'request inbox is not a directory'
+        if (inbox.st_mode & 0o070) != 0o070:
+            return 'request inbox is not writable by the shared group'
+        return ''
 
     @contextlib.contextmanager
     def lock(self):
-        """跨进程互斥。flock 对只读 fd 生效, 0644 锁文件两个账号都能打开。"""
+        """跨进程互斥。flock 对只读 fd 生效, 锁文件放在两个账号都能建的 inbox。"""
         self.ensure()
-        path = os.path.join(self.state_dir, 'lock')
-        fd = os.open(path, os.O_CREAT | os.O_RDONLY, 0o666)
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_RDONLY, 0o666)
         try:
             with _LOCAL_LOCK:
                 if fcntl is not None:
@@ -194,9 +301,6 @@ class LinkStore:
             os.close(fd)
 
     # -- 原子文件操作 ---------------------------------------------------
-    def _path(self, name):
-        return os.path.join(self.state_dir, name)
-
     @staticmethod
     def _read(path):
         try:
@@ -218,6 +322,9 @@ class LinkStore:
         一次性绑定码不能被第二个进程悄悄换掉。link 不可用时退化为
         O_EXCL 直写 (仍是 create-only, 只是不再整体原子)。
         """
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         text = json.dumps(obj, ensure_ascii=False, sort_keys=True)
         tmp = f'{path}.{os.getpid()}.{secrets.token_hex(6)}.part'
         with open(tmp, 'x', encoding='utf-8') as f:
@@ -242,15 +349,16 @@ class LinkStore:
             pass
 
     def _entries(self, prefix, suffix='.json'):
+        base = self.state_dir if self._dir_for(prefix) == 'trusted' else self.inbox_dir
         try:
-            names = os.listdir(self.state_dir)
+            names = os.listdir(base)
         except OSError:
             return []
         out = []
         for name in names:
             if not name.startswith(prefix) or not name.endswith(suffix):
                 continue
-            data = self._read(self._path(name))
+            data = self._read(os.path.join(base, name))
             if data is not None:
                 out.append((name, data))
         return out
@@ -258,7 +366,7 @@ class LinkStore:
     # -- 能力表 (Webhook 服务在线标记, 不含任何凭据) -------------------
     def publish_capabilities(self, now=None):
         now = time.time() if now is None else now
-        self.ensure()
+        self.ensure_trusted()
         self._write(self.caps_path, {
             'version': CAPABILITIES_VERSION,
             'enabled': True,
@@ -277,7 +385,7 @@ class LinkStore:
         now = time.time() if now is None else now
         return 0 <= (now - updated) <= max_age
 
-    # -- 绑定码 ---------------------------------------------------------
+    # -- 绑定码 (inbox, Web 写) -----------------------------------------
     def _all_codes(self):
         out = []
         for name, data in self._entries('code-'):
@@ -349,14 +457,15 @@ class LinkStore:
         self._unlink(self._path(f'code-{code_hash}.json'))
 
     def cancel_codes(self, user):
-        """解绑 / 绑定成功时, 作废该用户所有待用码 (调用方持有 lock)。"""
+        """作废该用户所有待用码 (调用方持有 lock)。"""
         for name, data in self._entries('code-'):
             if data.get('user') == user:
                 self._unlink(self._path(name))
 
-    # -- 绑定结果 -------------------------------------------------------
+    # -- 绑定结果 (trusted, Webhook 写) ---------------------------------
     def set_result(self, code_hash, ok, error='', user='', now=None):
         now = time.time() if now is None else now
+        self.ensure_trusted()
         self._write(self._path(f'result-{code_hash}.json'), {
             'version': 1, 'ok': bool(ok), 'error': error or '',
             'user': user or '', 'at': now,
@@ -378,7 +487,7 @@ class LinkStore:
                 found = (at, data)
         return found[1] if found else None
 
-    # -- 绑定关系 -------------------------------------------------------
+    # -- 绑定关系 (trusted, **只有通知侧可写**) -------------------------
     def binding(self, user):
         """只返回当前用户的绑定; 格式不合法一律视为未绑定。"""
         if not valid_user(user):
@@ -399,9 +508,11 @@ class LinkStore:
         return out
 
     def set_binding(self, user, line_user_id, now=None):
+        """通知侧专用: 写最终生效的绑定, 并清除该用户的解绑墓碑。"""
         if not valid_user(user) or not valid_line_id(line_user_id):
             raise ValueError('invalid binding')
         now = time.time() if now is None else now
+        self.ensure_trusted()
         self._write(self._path(f'binding-{digest(user)}.json'), {
             'version': 1,
             'user': user,
@@ -409,15 +520,70 @@ class LinkStore:
             'bound_at': now,
             'source': 'self',
         })
+        self._unlink(self._path(f'unlinked-{digest(user)}.json'))
 
-    def unlink(self, user):
-        """Web 侧解绑: 删绑定 + 作废所有待用码, 一次 lock 内完成。"""
+    # -- 解绑墓碑 (trusted, **只有通知侧可写**) -------------------------
+    def unlinked(self, user):
+        """该用户是否**明确解绑**过。墓碑存在 = 永不回退旧环境变量。"""
+        if not valid_user(user):
+            return None
+        data = self._read(self._path(f'unlinked-{digest(user)}.json'))
+        if not data or data.get('user') != user or not data.get('version'):
+            return None
+        return data
+
+    def set_unlinked(self, user, now=None):
+        """通知侧专用: 写墓碑。"""
+        if not valid_user(user):
+            raise ValueError('invalid user')
+        now = time.time() if now is None else now
+        self.ensure_trusted()
+        self._write(self._path(f'unlinked-{digest(user)}.json'), {
+            'version': 1, 'user': user, 'unlinked_at': now,
+            'source': 'self',
+        })
+
+    def has_unlink_request(self, user):
+        return self._read(self._path(f'unlink-{digest(user)}.json')) is not None
+
+    def request_unlink(self, user, now=None):
+        """Web 侧: 只**提出**解绑请求, 绝不碰权威绑定/墓碑文件。"""
+        if not valid_user(user):
+            return None
+        now = time.time() if now is None else now
         self.ensure()
         with self.lock():
-            self._unlink(self._path(f'binding-{digest(user)}.json'))
             self.cancel_codes(user)
+            self._write(self._path(f'unlink-{digest(user)}.json'), {
+                'version': 1, 'user': user, 'requested_at': now,
+            })
+        return {'state': 'unlinking'}
 
-    # -- 测试通知队列 ---------------------------------------------------
+    def pending_unlink_requests(self):
+        return self._entries('unlink-')
+
+    def read_unlink_request(self, name):
+        return self._read(self._path(name))
+
+    def drop_unlink_request(self, name):
+        self._unlink(self._path(name))
+
+    def apply_unlink(self, user, now=None):
+        """通知侧专用: 在同一次 lock 内完成「删绑定 + 写墓碑 + 取消待发测试」。
+
+        这是解绑唯一真正生效的地方; Web 侧调用 ``request_unlink`` 只会排队。
+        """
+        if not valid_user(user):
+            return
+        now = time.time() if now is None else now
+        self.ensure_trusted()
+        self._unlink(self._path(f'binding-{digest(user)}.json'))
+        self.set_unlinked(user, now=now)
+        self.cancel_codes(user)
+        self.cancel_pending_tests(user, now=now)
+        self._unlink(self._path(f'unlink-{digest(user)}.json'))
+
+    # -- 测试通知队列 (inbox) -------------------------------------------
     def queue_test(self, user, now=None):
         """Web 侧: 校验频率后把一次测试推送排进队列。"""
         if not valid_user(user):
@@ -425,7 +591,7 @@ class LinkStore:
         now = time.time() if now is None else now
         self.ensure()
         with self.lock():
-            if self.binding(user) is None:
+            if self.binding(user) is None or self.unlinked(user) is not None:
                 return None, 'not_bound'
             state = self._read(self._path('test-rate.json')) or {}
             history = state.get('history') if isinstance(state.get('history'), dict) else {}
@@ -447,22 +613,50 @@ class LinkStore:
         return [(name[len('test-'):-len('.req.json')], data)
                 for name, data in self._entries('test-', '.req.json')]
 
+    def read_test_request(self, rid):
+        return self._read(self._path(f'test-{rid}.req.json'))
+
+    def claim_test_request(self, rid, data):
+        """原子认领: 把 .req.json 换成 .claim.json, 防止重复/解绑后又被处理。"""
+        req_path = self._path(f'test-{rid}.req.json')
+        claim_path = self._path(f'test-{rid}.claim.json')
+        self._write(claim_path, {'version': 1, 'user': data.get('user'),
+                                 'requested_at': data.get('requested_at'),
+                                 'claimed_at': time.time()})
+        self._unlink(req_path)
+
     def set_test_result(self, rid, ok, error='', now=None):
         now = time.time() if now is None else now
         self._write(self._path(f'test-{rid}.res.json'), {
             'version': 1, 'ok': bool(ok), 'error': error or '', 'at': now,
         })
         self._unlink(self._path(f'test-{rid}.req.json'))
+        self._unlink(self._path(f'test-{rid}.claim.json'))
 
     def drop_test_request(self, rid):
         self._unlink(self._path(f'test-{rid}.req.json'))
+        self._unlink(self._path(f'test-{rid}.claim.json'))
+
+    def cancel_pending_tests(self, user, now=None):
+        """解绑时作废该用户所有尚未认领 / 已认领未回写的测试请求。"""
+        now = time.time() if now is None else now
+        for suffix in ('.req.json', '.claim.json'):
+            for name, data in self._entries('test-', suffix):
+                if data.get('user') != user:
+                    continue
+                rid = name[len('test-'):-len(suffix)]
+                self._write(self._path(f'test-{rid}.res.json'), {
+                    'version': 1, 'ok': False, 'error': 'cancelled', 'at': now,
+                })
+                self._unlink(self._path(name))
 
     def test_status(self, rid, user):
         if not isinstance(rid, str) or not REQUEST_ID_RE.fullmatch(rid):
             return {'state': 'error', 'error': ERROR_MESSAGES['unknown_request']}
-        req = self._read(self._path(f'test-{rid}.req.json'))
-        if req is not None and req.get('user') != user:
-            return {'state': 'error', 'error': ERROR_MESSAGES['forbidden']}
+        for suffix in ('.req.json', '.claim.json'):
+            owner = self._read(self._path(f'test-{rid}{suffix}'))
+            if owner is not None and owner.get('user') != user:
+                return {'state': 'error', 'error': ERROR_MESSAGES['forbidden']}
         res = self._read(self._path(f'test-{rid}.res.json'))
         if res is not None:
             if res.get('ok'):
@@ -473,16 +667,18 @@ class LinkStore:
             else:
                 message = ERROR_MESSAGES.get(err, ERROR_MESSAGES['send_failed'])
             return {'state': 'error', 'error': message, 'completed_at': res.get('at')}
-        if req is not None:
+        if self._read(self._path(f'test-{rid}.req.json')) is not None or \
+                self._read(self._path(f'test-{rid}.claim.json')) is not None:
             return {'state': 'pending'}
         return {'state': 'error', 'error': ERROR_MESSAGES['unknown_request']}
 
-    # -- Webhook 事件去重 -----------------------------------------------
+    # -- Webhook 事件去重 (trusted) -------------------------------------
     def seen_event(self, event_id):
         return self._read(self._path(f'event-{digest(event_id)}.json')) is not None
 
     def mark_event(self, event_id, now=None):
         now = time.time() if now is None else now
+        self.ensure_trusted()
         try:
             self._write_once(self._path(f'event-{digest(event_id)}.json'),
                              {'version': 1, 'at': now})
@@ -502,6 +698,11 @@ class LinkStore:
             'legacy': bool(legacy),
             'legacy_conflict': bool(conflict),
         }
+        # 解绑请求优先级最高: 用户点了「解除绑定」就立刻进入 unlinking,
+        # 哪怕权威绑定记录还没被通知侧删除 (那要等下一轮消费)。
+        if self.has_unlink_request(user):
+            payload['state'] = 'unlinking'
+            return payload
         binding = self.binding(user)
         if binding:
             payload['state'] = 'bound'
@@ -514,6 +715,11 @@ class LinkStore:
             payload['state'] = 'pending'
             payload['hash'] = name[len('code-'):-len('.json')]
             payload['expires_at'] = expires
+            return payload
+        # 「明确解绑」与「从未绑定」必须分开 —— 前者连旧配置也不能再用。
+        if self.unlinked(user) is not None:
+            payload['state'] = 'unlinked'
+            payload['legacy_disabled'] = True
             return payload
         recent = self.pending_codes(user=user, now=now, include_expired=True)
         if recent:
@@ -532,35 +738,37 @@ class LinkStore:
     # -- GC (Webhook 服务周期性调用) ------------------------------------
     def gc(self, now=None):
         now = time.time() if now is None else now
-        try:
-            names = os.listdir(self.state_dir)
-        except OSError:
-            return
         events = []
-        for name in names:
-            path = self._path(name)
-            if name.startswith('event-'):
-                data = self._read(path)
-                try:
-                    at = float(data.get('at', 0)) if data else 0
-                except (TypeError, ValueError):
-                    at = 0
-                if at and now - at > EVENT_TTL_SECONDS:
-                    self._unlink(path)
-                else:
-                    events.append((at, name))
+        for base in (self.state_dir, self.inbox_dir):
+            try:
+                names = os.listdir(base)
+            except OSError:
                 continue
-            if name.startswith(('code-', 'result-', 'test-')) and name.endswith('.json'):
-                try:
-                    age = now - os.path.getmtime(path)
-                except OSError:
+            for name in names:
+                path = os.path.join(base, name)
+                if name.startswith('event-'):
+                    data = self._read(path)
+                    try:
+                        at = float(data.get('at', 0)) if data else 0
+                    except (TypeError, ValueError):
+                        at = 0
+                    if at and now - at > EVENT_TTL_SECONDS:
+                        self._unlink(path)
+                    else:
+                        events.append((at, path))
                     continue
-                if age > STATE_FILE_TTL_SECONDS:
-                    self._unlink(path)
+                if name.startswith(('code-', 'result-', 'test-', 'unlink-')) \
+                        and name.endswith('.json'):
+                    try:
+                        age = now - os.path.getmtime(path)
+                    except OSError:
+                        continue
+                    if age > STATE_FILE_TTL_SECONDS:
+                        self._unlink(path)
         if len(events) > MAX_EVENT_FILES:
             events.sort()
-            for _at, name in events[:len(events) - MAX_EVENT_FILES]:
-                self._unlink(self._path(name))
+            for _at, path in events[:len(events) - MAX_EVENT_FILES]:
+                self._unlink(path)
 
 
 # ── 给通知引擎用的轻量查询 (只读, 不建目录) -----------------------------
@@ -573,3 +781,8 @@ def bound_target(data_dir, user):
 def bound_users(data_dir):
     """所有已自助绑定的 Todo 用户 id (给能力表用, 不含 LINE ID)。"""
     return sorted(LinkStore(data_dir).bindings())
+
+
+def explicitly_unlinked(data_dir, user):
+    """是否**明确解绑**过 (墓碑)。通知引擎据此禁止回退旧地址。"""
+    return LinkStore(data_dir).unlinked(user) is not None
