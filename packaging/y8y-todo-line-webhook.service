@@ -1,0 +1,62 @@
+# y8y Todo —— LINE 自助绑定 Webhook (常驻) systemd 单元示例
+# (复制到 /etc/systemd/system/y8y-todo-line-webhook.service)
+#
+# 为什么需要第三个进程
+# --------------------
+# LINE 官方服务器要能把 Webhook POST 进来, 所以必须有一个常驻监听者。
+# 但 Channel Secret 与 Channel Access Token 都**不能**给 Web 进程
+# (y8y-todo.service) —— 那会破坏既有的凭据隔离 (docs/deployment.md §5.2)。
+# 因此这个单元与通知调度器同属「通知侧」信任域, 用独立的系统用户
+# y8y-notify 运行, 只监听回环地址, 由反向代理把**唯一**的公开路径
+# /line/webhook 转发过来。
+#
+# 它不调用 Todo 的任何内部 API。Web ↔ 本进程只通过
+# <data>/notify/line-link/ 下的单写者文件通信 (见 src/line_link.py)。
+#
+# ⚠️ 前提 (与通知调度器相同, 见 docs/deployment.md §5.2.6):
+#   sudo useradd --system --user-group --no-create-home \
+#           --shell /usr/sbin/nologin y8y-notify
+#   sudo usermod --append --groups y8y-notify y8y
+#   sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+#
+# 安装:
+#   sudo cp /opt/y8y-todo/packaging/y8y-todo-line-webhook.service \
+#           /etc/systemd/system/y8y-todo-line-webhook.service
+#   sudo -e /etc/y8y-todo/y8y-todo-notify.env      # 填 Channel Secret + Token
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now y8y-todo-line-webhook.service
+#   sudo journalctl -u y8y-todo-line-webhook.service -n 30 --no-pager
+#
+# 反向代理 / Cloudflare Access 的**独立公开入口**配置见
+# docs/deployment.md §3.5 —— 不要为它关闭整个应用的身份认证。
+[Unit]
+Description=y8y Todo LINE self-service link webhook
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 与通知调度器同一个独立系统用户 (内核强制的凭据边界), 绝不是 root,
+# 也绝不是 Web 服务使用的 y8y。
+User=y8y-notify
+Group=y8y-notify
+WorkingDirectory=/opt/y8y-todo/src
+# 身份/数据目录配置 (与 Web 共用); 凭据只在下面这个 env 文件里,
+# 由 systemd 以 root 读取后注入, 不进 argv / journald / 仓库。
+EnvironmentFile=-/etc/y8y-todo/y8y-todo.env
+EnvironmentFile=-/etc/y8y-todo/y8y-todo-notify.env
+ExecStart=/usr/bin/python3 /opt/y8y-todo/src/line_webhook.py
+Restart=always
+RestartSec=5
+# 与主服务一致的加固: **唯一**可写路径是通知状态目录。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=-/var/lib/y8y-todo/notify
+PrivateTmp=true
+# 两个服务账号靠共享组读写 line-link/ 里的文件, 需要 group 可读。
+UMask=0022
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

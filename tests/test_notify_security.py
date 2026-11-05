@@ -54,6 +54,7 @@ from test_notifications import (                                  # noqa: E402
 # 虚构的凭据 —— 形状像真的, 值是编的
 FAKE_LINE_TOKEN = 'LINE_TOKEN_fake_0123456789abcdef'
 FAKE_EMAIL_KEY = 're_fake_0123456789abcdefXYZ'
+FAKE_LINE_CHANNEL_SECRET = 'CHANNEL_SECRET_fake_0123456789abcdef'
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -111,7 +112,8 @@ def test_notify_units_load_credentials_via_environment_file():
     """通知单元必须用 EnvironmentFile= 读凭据文件, 不能内联凭据。"""
     for name in ('y8y-todo-notify.service',
                  'y8y-todo-notify-dry-run.service',
-                 'y8y-todo-notify-test@.service'):
+                 'y8y-todo-notify-test@.service',
+                 'y8y-todo-line-webhook.service'):
         text = (REPO / 'packaging' / name).read_text(encoding='utf-8')
         assert 'EnvironmentFile=-/etc/y8y-todo/y8y-todo-notify.env' in text, name
         # 凭据不得以 Environment= 内联进单元
@@ -177,8 +179,11 @@ def test_notify_config_secrets_only_lists_credentials():
         'Y8Y_NOTIFY_EMAIL_API_KEY': FAKE_EMAIL_KEY,
         'Y8Y_NOTIFY_EMAIL_FROM': 'Y8y Todo <todo@example.com>',
         'Y8Y_NOTIFY_LINE_TARGETS': 'alice=U0000000000000000000000000000000',
+        'Y8Y_NOTIFY_LINE_CHANNEL_SECRET': FAKE_LINE_CHANNEL_SECRET,
     })
-    assert config.secrets() == [FAKE_LINE_TOKEN, FAKE_EMAIL_KEY]
+    # 新增的 Channel Secret 也是真凭据, 必须一起进脱敏名单。
+    assert config.secrets() == [FAKE_LINE_TOKEN, FAKE_EMAIL_KEY,
+                                FAKE_LINE_CHANNEL_SECRET]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -629,7 +634,8 @@ def test_packaged_notify_units_use_a_different_user_than_the_web_unit():
     for name, key in (('y8y-todo.service', 'web'),
                       ('y8y-todo-notify.service', 'notify'),
                       ('y8y-todo-notify-dry-run.service', 'notify'),
-                      ('y8y-todo-notify-test@.service', 'notify')):
+                      ('y8y-todo-notify-test@.service', 'notify'),
+                      ('y8y-todo-line-webhook.service', 'notify')):
         text = (REPO / 'packaging' / name).read_text(encoding='utf-8')
         users = [ln.split('=', 1)[1].strip()
                  for ln in text.splitlines() if ln.startswith('User=')]
@@ -638,7 +644,7 @@ def test_packaged_notify_units_use_a_different_user_than_the_web_unit():
             web_user = users[0]
         else:
             assert notify_user is None or notify_user == users[0], \
-                '三个通知单元必须用同一个用户'
+                '所有通知侧单元必须用同一个用户'
             notify_user = users[0]
     assert web_user and notify_user
     assert web_user != notify_user, (
@@ -654,7 +660,8 @@ def test_notify_units_only_allow_writing_the_notification_state_dir():
     """
     for name in ('y8y-todo-notify.service',
                  'y8y-todo-notify-dry-run.service',
-                 'y8y-todo-notify-test@.service'):
+                 'y8y-todo-notify-test@.service',
+                 'y8y-todo-line-webhook.service'):
         text = (REPO / 'packaging' / name).read_text(encoding='utf-8')
         rw = [ln.split('=', 1)[1].strip()
               for ln in text.splitlines() if ln.startswith('ReadWritePaths=')]

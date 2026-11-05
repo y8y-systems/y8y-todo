@@ -79,6 +79,7 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone as _timezone
 
 from config import Config
+import line_link                     # 自助绑定状态 (无凭据, 不 import 本模块)
 from taskstore import (
     atomic_write,
     can_access,
@@ -361,7 +362,22 @@ class NotifyConfig(Config):
 
         # LINE Messaging API
         self.line_token = env.get('Y8Y_NOTIFY_LINE_TOKEN', '').strip()
+        # ⚠️ 旧配置: 运维在环境里写死 用户id=LINE User ID。仍作为**回退**
+        # 生效, 用户一旦自助绑定就以自助绑定为准 (见 LineProvider.target_for)。
         self.line_targets = _parse_targets(env.get('Y8Y_NOTIFY_LINE_TARGETS', ''))
+        # Channel Secret 只由独立的常驻 Webhook 服务读取, Web 进程读不到它。
+        self.line_channel_secret = env.get('Y8Y_NOTIFY_LINE_CHANNEL_SECRET', '').strip()
+        self.line_webhook_bind = (env.get('Y8Y_NOTIFY_LINE_WEBHOOK_BIND', '127.0.0.1')
+                                  .strip() or '127.0.0.1')
+        self.line_webhook_port = max(1, _int(
+            env.get('Y8Y_NOTIFY_LINE_WEBHOOK_PORT', '8087'), 8087))
+        # 新旧收件人不一致时的策略:
+        #   binding (默认) —— 自助绑定优先, 冲突写进能力表 / 界面可见;
+        #   strict         —— 该用户停发 (fail closed), 由运维清理旧配置。
+        self.line_conflict_policy = (env.get('Y8Y_NOTIFY_LINE_CONFLICT_POLICY',
+                                            'binding').strip().lower() or 'binding')
+        if self.line_conflict_policy not in ('binding', 'strict'):
+            self.line_conflict_policy = 'binding'
 
         # Email (Resend)
         self.email_api_key = env.get('Y8Y_NOTIFY_EMAIL_API_KEY', '').strip()
@@ -409,10 +425,10 @@ class NotifyConfig(Config):
     def secrets(self):
         """本配置里的所有敏感值 —— 供日志/状态文件脱敏使用。
 
-        只含真正的凭据 (LINE token / Resend API key)。收件地址、用户 id
-        之类不是凭据, 保持原样便于排查问题。
+        只含真正的凭据 (LINE token / Channel Secret / Resend API key)。
+        收件地址、用户 id 之类不是凭据, 保持原样便于排查问题。
         """
-        return [self.line_token, self.email_api_key]
+        return [self.line_token, self.email_api_key, self.line_channel_secret]
 
 
 def _int(raw, default):
@@ -947,10 +963,50 @@ class LineProvider(Provider):
     def configured(self):
         return bool(self.config.line_token)
 
+    @property
+    def _links(self):
+        """惰性构造只读视图 —— 不建目录、不改写配置对象。"""
+        store = getattr(self, '_link_store', None)
+        if store is None:
+            store = line_link.LinkStore(getattr(self.config, 'data_dir', ''))
+            self._link_store = store
+        return store
+
+    def _sources(self, user):
+        """(自助绑定的 LINE ID, 旧环境变量里的 LINE ID)。
+
+        对测试里的最小化配置对象 (没有 ``line_targets``) 也保持可调用。
+        """
+        bound = self._links.binding(user)
+        bound_id = bound.get('line_user_id', '') if bound else ''
+        legacy = (getattr(self.config, 'line_targets', None) or {}).get(user, '')
+        return bound_id, legacy
+
+    def conflict_for(self, user):
+        """两个来源都在且指向不同 LINE 账号 —— 需要显式处理, 不能静默。"""
+        bound, legacy = self._sources(user)
+        return bool(bound and legacy and bound != legacy)
+
     def target_for(self, user):
-        return self.config.line_targets.get(user, '')
+        """收件人优先级: 自助绑定 > 旧环境变量 (只作未绑定用户的回退)。
+
+        冲突时的处理由 ``Y8Y_NOTIFY_LINE_CONFLICT_POLICY`` 决定, 且一定
+        **可见**: 能力表里的 ``line_conflicts`` 会让 Web 界面显示冲突提示。
+        ``strict`` 下直接不返回目标 (fail closed), 一条都不发。
+        """
+        bound, legacy = self._sources(user)
+        if bound and legacy and bound != legacy:
+            if getattr(self.config, 'line_conflict_policy', 'binding') == 'strict':
+                return ''
+        return bound or legacy or ''
 
     def send(self, user, message):
+        if self.conflict_for(user) and \
+                getattr(self.config, 'line_conflict_policy', 'binding') == 'strict':
+            raise ProviderError(
+                'LINE 收件人冲突：自助绑定与旧环境变量指向不同账号，'
+                '已停止发送；请管理员移除该用户的旧配置或改用 binding 策略',
+                retryable=False)
         target = self.target_for(user)
         if not target:
             raise ProviderError(f'no LINE target configured for user {user!r}', retryable=False)
@@ -1074,20 +1130,47 @@ class Capabilities:
             })
         return out
 
+    def _user_list(self, key):
+        raw = self.load().get(key)
+        return [u for u in raw if isinstance(u, str)] if isinstance(raw, list) else []
+
+    def line_legacy_users(self):
+        """仍由旧环境变量提供 LINE 目标的 Todo 用户 (Web 用来提示迁移)。"""
+        return self._user_list('line_legacy_users')
+
+    def line_conflicts(self):
+        """新旧收件人不一致的用户 —— Web 界面必须显示冲突提示。"""
+        return self._user_list('line_conflicts')
+
 
 def publish_capabilities(path, config, providers, users=()):
     """发布能力表 (由调度器调用)。**只写渠道名与可投递的用户, 不含凭据。**"""
     known = set(users) | set(config.users.values()) | {config.default_owner}
+    # 自助绑定的用户即使还没在偏好文件里出现过, 也要进能力表 ——
+    # 否则 Web 端会以为他没有 LINE 渠道。
+    try:
+        known |= set(line_link.bound_users(config.data_dir))
+    except OSError:
+        pass
     channels = []
     for name, provider in sorted(providers.items()):
         targets = sorted(u for u in known if provider.target_for(u))
         if targets:
             channels.append({'name': name, 'label': provider.label, 'users': targets})
+    # 只写**用户 id**, 绝不写 LINE User ID / 凭据 (test_notifications 钉死)。
+    legacy_users = sorted(getattr(config, 'line_targets', {}) or {})
+    conflicts = []
+    for provider in providers.values():
+        if getattr(provider, 'name', '') == 'line' and hasattr(provider, 'conflict_for'):
+            conflicts = sorted(u for u in known if provider.conflict_for(u))
+            break
     payload = {
         'version': CAPABILITIES_VERSION,
         'enabled': bool(config.notify_enabled),
         'updated_at': _now_iso(),
         'channels': channels,
+        'line_legacy_users': legacy_users,
+        'line_conflicts': conflicts,
     }
     atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2))
     return payload

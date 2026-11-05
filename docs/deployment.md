@@ -62,11 +62,14 @@ is ever served unauthenticated.
 | `Y8Y_DEV_USER` | `dev` | identity used in dev mode |
 | `Y8Y_CN_HOLIDAYS` | `1` | master switch for the Chinese-holiday display in the calendar |
 | `Y8Y_CN_HOLIDAY_USERS` | *(empty = all)* | comma-separated identity ids that see Chinese holidays by default |
+| `Y8Y_LINE_BOT_ID` | *(empty)* | LINE Bot Basic ID — **public, not a credential**; only used to build the "open the official bot chat" deep link for self-service LINE binding |
 
 The notification subsystem has **its own** variables, read only by the
-scheduler process — see [§ 5.1 Notifications](#51-notifications-optional).
+scheduler process and the LINE webhook process — see
+[§ 5.1 Notifications](#51-notifications-optional) and
+[docs/line-self-link.md](line-self-link.md).
 They are intentionally *not* in the table above: the web service must
-never be able to read a LINE token or an email API key.
+never be able to read a LINE token, a Channel Secret or an email API key.
 
 ### User mapping
 
@@ -260,6 +263,78 @@ That is a misconfiguration, not a bypass: the app still refuses it.
       the header from addresses in `Y8Y_TRUSTED_PROXIES`
       (`tests/test_auth.py` locks this, including `X-Forwarded-For`
       spoofing).
+
+### 3.5 为 LINE Webhook 开一个独立的公开入口
+
+LINE 官方服务器必须能 POST 到 `/line/webhook`，但**这不代表整个 Todo 应用可以
+绕过 Cloudflare Access**。V1 用第三个进程把两类认证彻底分开：
+
+| 进程 | 用户 | 监听 | 认证 |
+| --- | --- | --- | --- |
+| `y8y-todo.service` | `y8y` | `127.0.0.1:8086` | Todo 用户（Access / 身份头 / 机器 Token） |
+| `y8y-todo-line-webhook.service` | `y8y-notify` | `127.0.0.1:8087` | **只有** `X-Line-Signature`（HMAC-SHA256 over raw body） |
+| `y8y-todo-notify.service` | `y8y-notify` | 无（timer 一次性） | 系统账号 + env 文件 |
+
+Webhook 服务**只**接受 `POST /line/webhook`，其它路径/方法一律 404；它没有任何
+调用 Todo 内部 API 的客户端。两个进程只通过 `<data>/notify/line-link/` 下的
+单写者文件通信（见 `docs/line-self-link.md §2/§4`）。
+
+#### Cloudflare Access
+
+1. 主应用 `todo.example.com/*` 的认证策略**保持不变**。
+2. 新建一个更具体的 Application，路径精确为 `todo.example.com/line/webhook`，
+   Policy = **Bypass / Everyone**（Access 按最长路径匹配，只有这一条绕过）。
+3. 建议再给这个路径加一条 WAF Rate Limiting（POST 频率上限）。
+4. 不要给 `/todo/*` 或整站开 Bypass；不要把 Webhook 端口直接暴露到公网。
+
+#### Caddy
+
+把 Webhook 的 `handle` 放在需要认证的 `handle` **之前**（同一 site block 内）：
+
+```caddyfile
+todo.example.com {
+    @linewebhook path /line/webhook
+    handle @linewebhook {
+        # 客户端自带的身份头 / 机器 Token 一律剥掉；Webhook 服务不认它们。
+        header_up -X-Internal-Token
+        header_up -Cf-Access-Authenticated-User-Email
+        # 不改写 body: 签名是对原始请求体计算的。
+        reverse_proxy 127.0.0.1:8087
+    }
+    handle {
+        # 把 §3 Option B 里原来的 forward_auth + reverse_proxy 配置
+        # 原样搬到这里即可 (含 header_up -X-Internal-Token)。
+        reverse_proxy 127.0.0.1:8086
+    }
+}
+```
+
+#### nginx
+
+⚠️ **继承陷阱**（本项目实测踩过）：某个 `location` 只要写了任意一条自己的
+`proxy_set_header`，server 级的全部条目都不会被继承 —— Token 剥离指令必须和
+身份头替换写在**同一个 location 块**里。
+
+```nginx
+location = /line/webhook {
+    client_max_body_size 64k;
+    limit_except POST { deny all; }
+    proxy_pass http://127.0.0.1:8087;
+    proxy_set_header Host $host;
+    proxy_set_header X-Line-Signature $http_x_line_signature;
+    proxy_set_header X-Internal-Token "";
+    proxy_set_header Cf-Access-Authenticated-User-Email "";
+    # 不要用 proxy_set_body / sub_filter / gzip 改写 body
+}
+```
+
+#### 验证清单
+
+- [ ] `curl -i -X POST https://todo.example.com/line/webhook -d '{}'` → **401**（缺签名被拒，说明路径通且 Access 放行正确）
+- [ ] LINE Developers → Webhook → **Verify** → Success
+- [ ] `curl -i https://todo.example.com/todo/api/tasks` → 仍被 Access 拦截 / 401
+- [ ] 请求体 >64 KiB → 413；非 `/line/webhook` 路径 → 404
+- [ ] 网页自助绑定一次 + 测试通知成功（完整步骤见 `README.md` 的 LINE 章节）
 
 ## 4. Machine-to-machine access (y8ysystems-style services)
 
@@ -629,6 +704,42 @@ the API key with `***`.
   it a restored deployment would re-send reminders that already went out.
   The whole data directory is what you back up, so it is included
   (§7).
+
+#### LINE self-service linking (V1) — one extra unit, no extra privilege
+
+Self-service LINE binding adds a **third process**,
+`y8y-todo-line-webhook.service` (packaged template in `packaging/`). It runs
+as the **same** `y8y-notify` account as the scheduler, listens only on
+`127.0.0.1:8087`, and is reached exclusively through the single public
+path `/line/webhook` (see §3.5). It is the only component that reads
+`Y8Y_NOTIFY_LINE_CHANNEL_SECRET`; it reuses `notifications.LineProvider`
+for the test push, so there is no second LINE API client.
+
+```bash
+sudo install -d -o y8y-notify -g y8y-notify -m 2770 \
+        /var/lib/y8y-todo/notify/line-link
+sudo cp /opt/y8y-todo/packaging/y8y-todo-line-webhook.service \
+        /etc/systemd/system/y8y-todo-line-webhook.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now y8y-todo-line-webhook.service
+```
+
+The web unit is **unchanged**: it still reads only
+`/etc/y8y-todo/y8y-todo.env`, and that file only gains the *public*
+`Y8Y_LINE_BOT_ID` (a Bot Basic ID, not a credential). The Channel Secret
+and Channel Access Token stay in `y8y-todo-notify.env` (`root:root 600`).
+
+New state lives in `<data>/notify/line-link/` — a setgid `2770` directory
+owned by `y8y-notify`, with `y8y` in that group. Every file there has a
+single writer; multi-file atomic operations use an `flock` file in the same
+directory. It contains no credentials and is covered by the normal data
+directory backup. Full detail: `docs/line-self-link.md`.
+
+`Y8Y_NOTIFY_LINE_TARGETS` remains as a **fallback** for users who have not
+self-bound, so an upgrade never silently removes anyone's notifications.
+When both sources disagree, the conflict is published in the capability
+table (user ids only) and shown in the settings UI; set
+`Y8Y_NOTIFY_LINE_CONFLICT_POLICY=strict` to fail closed instead.
 
 ### 5.2 Credential isolation (process permissions)
 

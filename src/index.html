@@ -433,6 +433,41 @@ body::after {
   margin-top: 12px;
   width: 100%;
 }
+/* ── LINE 自助绑定 (V1) ──
+   沿用 y8ybrand 共享按钮与字号档; 只追加新样式, 不动通知面板。 */
+.line-link-state {
+  font-size: var(--fs-12);
+  font-family: var(--font-ui);
+  color: var(--text-primary);
+  margin: 4px 0 8px;
+}
+.line-link-state.is-bound { color: var(--color-brand); }
+.line-link-state.is-error { color: var(--color-danger); }
+.line-link-code {
+  font-family: var(--font-ui);
+  font-size: var(--fs-13);
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 2px dashed var(--border-default);
+  padding: 10px 12px;
+  margin: 8px 0;
+  word-break: break-all;
+  user-select: all;
+  -webkit-user-select: all;
+}
+.line-link-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+/* ⚠️ 作者样式里的 display:flex 会盖掉 UA 的 [hidden]{display:none}
+   (同特异性, 作者优先) —— 必须显式把 hidden 状态钉死, 否则「绑定 LINE」
+   按钮在已连接 / 等待态里也一直露出来。 */
+#lineLinkGroup [hidden] { display: none !important; }
+/* 不加 @media: index.html 的媒体查询数量被节假日年度检查脚本钉死为 5。
+   min-width 让桌面端三个操作挤得进一行 (设置弹窗宽 420px), 窄屏自然换行。 */
+.line-link-actions .y8y-btn { flex: 1 1 auto; min-width: 108px; }
 /* ── 持久项目 (2026-08-11) ── */
 .persistent-row {
   display: flex;
@@ -1878,6 +1913,31 @@ body.modal-locked {
         </div>
         <div class="settings-hint">带时间的共享任务按「提前提醒」单独通知，也会出现在当天的每日摘要里；全天任务只进摘要。私人任务不会进入任何通知。</div>
         <button class="btn btn-primary y8y-btn y8y-btn-primary notify-save" id="notifySaveBtn" type="button">保存通知设置</button>
+      </div>
+      <div class="settings-group y8y-settings-group" id="lineLinkGroup">
+        <label class="settings-label y8y-settings-label">LINE 账号</label>
+        <div class="line-link-state" id="lineLinkState" role="status" aria-live="polite">正在读取 LINE 绑定状态…</div>
+        <div id="lineLinkPending" hidden>
+          <div class="settings-hint">复制绑定码，在 LINE 里向官方 Bot 发送它（仅一对一聊天有效）。绑定码 10 分钟内有效，且只能使用一次。</div>
+          <div class="line-link-code" id="lineLinkCode"></div>
+          <div class="line-link-actions">
+            <button class="btn btn-primary y8y-btn y8y-btn-primary y8y-btn-sm" id="lineLinkCopyBtn" type="button">复制绑定码</button>
+            <a class="btn y8y-btn y8y-btn-ghost y8y-btn-sm" id="lineLinkOpenBtn" href="#" target="_blank" rel="noopener noreferrer" hidden>打开 LINE</a>
+            <button class="btn y8y-btn y8y-btn-ghost y8y-btn-sm" id="lineLinkCancelBtn" type="button">取消</button>
+          </div>
+          <div class="settings-hint" id="lineLinkProgress" role="status" aria-live="polite">等待 LINE 消息…</div>
+        </div>
+        <div id="lineLinkBound" hidden>
+          <div class="line-link-actions">
+            <button class="btn y8y-btn y8y-btn-ghost y8y-btn-sm" id="lineLinkTestBtn" type="button">发送测试通知</button>
+            <button class="btn y8y-btn y8y-btn-ghost y8y-btn-sm" id="lineLinkRebindBtn" type="button">更换 LINE 账号</button>
+            <button class="btn y8y-btn y8y-btn-danger y8y-btn-sm" id="lineLinkUnlinkBtn" type="button">解除绑定</button>
+          </div>
+        </div>
+        <div class="line-link-actions" id="lineLinkUnboundActions" hidden>
+          <button class="btn btn-primary y8y-btn y8y-btn-primary y8y-btn-sm" id="lineLinkStartBtn" type="button">绑定 LINE</button>
+        </div>
+        <div class="settings-hint" id="lineLinkHint"></div>
       </div>
       <div class="settings-group y8y-settings-group">
         <label class="settings-label y8y-settings-label">持久项目</label>
@@ -3981,9 +4041,11 @@ function openSettings() {
   updateCalTodoOnlyControls();
   renderPersistentProjects();
   loadNotificationSettings();
+  startLineLinkPolling();
   document.getElementById('settingsOverlay').classList.add('open');
 }
 function closeSettings() {
+  stopLineLinkPolling();
   document.getElementById('settingsOverlay').classList.remove('open');
 }
 document.getElementById('settingsBtn').addEventListener('click', openSettings);
@@ -4109,6 +4171,198 @@ async function saveNotificationSettings() {
 document.getElementById('notifyEnabledBtn').addEventListener('click', () => toggleNotifyButton('notifyEnabledBtn'));
 document.getElementById('notifyDigestBtn').addEventListener('click', () => toggleNotifyButton('notifyDigestBtn'));
 document.getElementById('notifySaveBtn').addEventListener('click', saveNotificationSettings);
+
+// ── LINE 自助绑定 (V1) ──────────────────────────────────────────────
+// 绑定码原文只在浏览器内存 / sessionStorage 里; 服务端只存它的 sha256。
+// 推送凭据始终留在独立的 Webhook 服务里, 这里只排队 + 轮询结果。
+let lineLinkState = null;
+let lineLinkTimer = null;
+let lineLinkTestTimer = null;
+let lineLinkRefreshSeq = 0;
+const LINE_LINK_POLL_MS = 1500;
+const LINE_LINK_TEST_TIMEOUT_MS = 20000;
+
+function lineLinkCodeFromSession(hash) {
+  if (!hash) return '';
+  try { return sessionStorage.getItem('y8y.lineLink.' + hash) || ''; } catch (e) { return ''; }
+}
+function lineLinkRememberCode(hash, code) {
+  try { sessionStorage.setItem('y8y.lineLink.' + hash, code); } catch (e) { /* 隐私模式下忽略 */ }
+}
+function lineLinkForgetCode(hash) {
+  if (!hash) return;
+  try { sessionStorage.removeItem('y8y.lineLink.' + hash); } catch (e) { /* ignore */ }
+}
+
+function renderLineLink() {
+  const s = lineLinkState;
+  const stateEl = document.getElementById('lineLinkState');
+  const pendingEl = document.getElementById('lineLinkPending');
+  const boundEl = document.getElementById('lineLinkBound');
+  const unboundEl = document.getElementById('lineLinkUnboundActions');
+  const hintEl = document.getElementById('lineLinkHint');
+  if (!s) { stateEl.textContent = 'LINE 绑定状态不可用'; return; }
+  stateEl.className = 'line-link-state';
+  pendingEl.hidden = true; boundEl.hidden = true; unboundEl.hidden = true;
+  hintEl.textContent = s.hint || '';
+
+  if (s.state === 'bound') {
+    stateEl.textContent = 'LINE：已连接' + (s.line_user_masked ? '（' + s.line_user_masked + '）' : '');
+    stateEl.classList.add('is-bound');
+    boundEl.hidden = false;
+    return;
+  }
+  if (s.state === 'pending' || s.state === 'expired') {
+    const code = lineLinkCodeFromSession(s.hash);
+    stateEl.textContent = s.state === 'expired' ? '绑定码已过期' : '等待 LINE 确认…';
+    if (s.state === 'expired') stateEl.classList.add('is-error');
+    pendingEl.hidden = false;
+    document.getElementById('lineLinkCode').textContent = code || '（请重新生成绑定码）';
+    document.getElementById('lineLinkCopyBtn').disabled = !code;
+    const openBtn = document.getElementById('lineLinkOpenBtn');
+    if (s.deep_link) { openBtn.href = s.deep_link; openBtn.hidden = false; }
+    else { openBtn.hidden = true; openBtn.href = '#'; }
+    document.getElementById('lineLinkProgress').textContent = s.state === 'expired'
+      ? '已过期，请重新生成。' : '请在 LINE 里向官方 Bot 发送上面的绑定码；本页会自动更新。';
+    return;
+  }
+  if (s.state === 'error') {
+    stateEl.textContent = s.error || '绑定失败';
+    stateEl.classList.add('is-error');
+  } else {
+    stateEl.textContent = s.available ? 'LINE：未绑定' : 'LINE：尚未启用';
+  }
+  unboundEl.hidden = false;
+  document.getElementById('lineLinkStartBtn').disabled = !s.available;
+  document.getElementById('lineLinkStartBtn').textContent = s.available ? '绑定 LINE' : '未启用 LINE 自助绑定';
+}
+
+async function refreshLineLink() {
+  // 轮询与用户的 POST/DELETE 会并发; 用一个序号丢弃过期的响应,
+  // 避免「刚解绑成功, 又被一个在飞的旧 GET 打回已连接」。
+  const seq = ++lineLinkRefreshSeq;
+  try {
+    const res = await fetch('/todo/api/line-link', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (seq !== lineLinkRefreshSeq) return;
+    const previousHash = lineLinkState && lineLinkState.hash;
+    lineLinkState = data;
+    if (previousHash && previousHash !== data.hash) lineLinkForgetCode(previousHash);
+    renderLineLink();
+  } catch (e) { /* 离线时保留上一次渲染 */ }
+}
+
+function startLineLinkPolling() {
+  stopLineLinkPolling();
+  refreshLineLink();
+  lineLinkTimer = setInterval(() => {
+    if (lineLinkState && (lineLinkState.state === 'pending' || lineLinkState.state === 'expired')) {
+      refreshLineLink();
+    }
+  }, LINE_LINK_POLL_MS);
+}
+function stopLineLinkPolling() {
+  if (lineLinkTimer) { clearInterval(lineLinkTimer); lineLinkTimer = null; }
+  if (lineLinkTestTimer) { clearTimeout(lineLinkTestTimer); lineLinkTestTimer = null; }
+}
+
+async function startLineLink(replace) {
+  const btn = document.getElementById('lineLinkStartBtn');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/todo/api/line-link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ replace: !!replace }),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '无法创建绑定码'), 3000); btn.disabled = false; return; }
+    lineLinkRefreshSeq++;
+    lineLinkRememberCode(data.hash, data.code);
+    lineLinkState = Object.assign({}, data, {
+      available: true, state: 'pending', bot_id: data.bot_id || '',
+      deep_link: data.deep_link || '', legacy: false, legacy_conflict: false, hint: '',
+    });
+    renderLineLink();
+    showToast('✓ 绑定码已生成，请在 LINE 里发送', 2500);
+  } catch (e) {
+    showToast('✗ 绑定码生成失败', 2500);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function unlinkLine() {
+  if (!window.confirm('确定要解除 LINE 绑定吗？解除后将不再收到 LINE 通知。')) return;
+  try {
+    const res = await fetch('/todo/api/line-link', { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '解除绑定失败'), 3000); return; }
+    lineLinkRefreshSeq++;
+    if (lineLinkState && lineLinkState.hash) lineLinkForgetCode(lineLinkState.hash);
+    lineLinkState = data;
+    renderLineLink();
+    showToast('✓ 已解除 LINE 绑定');
+  } catch (e) { showToast('✗ 解除绑定失败', 2500); }
+}
+
+function pollLineTest(requestId, startedAt) {
+  const tick = async () => {
+    try {
+      const res = await fetch('/todo/api/line-test?id=' + encodeURIComponent(requestId),
+                              { cache: 'no-store' });
+      const data = await res.json();
+      if (data.state === 'ok') { showToast('✓ 测试通知已发送，请查看 LINE'); return; }
+      if (data.state === 'error') { showToast('✗ ' + (data.error || '测试通知发送失败'), 4000); return; }
+    } catch (e) { /* 网络抖动: 继续等 */ }
+    if (Date.now() - startedAt < LINE_LINK_TEST_TIMEOUT_MS) {
+      lineLinkTestTimer = setTimeout(tick, 1000);
+    } else {
+      showToast('✗ 测试通知超时，请稍后再试', 3500);
+    }
+  };
+  tick();
+}
+
+async function sendLineTest() {
+  const btn = document.getElementById('lineLinkTestBtn');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/todo/api/line-test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json();
+    if (!res.ok) { showToast('✗ ' + (data.error || '无法发送测试通知'), 3500); return; }
+    showToast('测试通知已排队，正在发送…', 2000);
+    pollLineTest(data.request_id, Date.now());
+  } catch (e) {
+    showToast('✗ 测试通知请求失败', 2500);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('lineLinkStartBtn').addEventListener('click', () => startLineLink(false));
+document.getElementById('lineLinkRebindBtn').addEventListener('click', () => startLineLink(true));
+document.getElementById('lineLinkUnlinkBtn').addEventListener('click', unlinkLine);
+document.getElementById('lineLinkTestBtn').addEventListener('click', sendLineTest);
+document.getElementById('lineLinkCancelBtn').addEventListener('click', async () => {
+  if (lineLinkState && lineLinkState.hash) lineLinkForgetCode(lineLinkState.hash);
+  await refreshLineLink();
+});
+document.getElementById('lineLinkCopyBtn').addEventListener('click', () => {
+  const text = document.getElementById('lineLinkCode').textContent.trim();
+  if (!text) return;
+  const done = () => showToast('✓ 绑定码已复制，请粘贴到 LINE');
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else {
+    fallbackCopy(text, done);
+  }
+});
 
 // ── 持久项目 (2026-08-12: localStorage → 后端 /todo/api/persistent-projects, 跨设备同步) ──
 let persistentProjectsCache = [];
