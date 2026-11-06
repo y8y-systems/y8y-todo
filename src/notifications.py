@@ -988,29 +988,40 @@ class LineProvider(Provider):
         return bool(bound and legacy and bound != legacy)
 
     def target_for(self, user):
-        """收件人优先级: 自助绑定 > **明确解绑后停发** > 旧环境变量。
+        """收件人优先级: **解绑请求/墓碑立即停发** > 自助绑定 > 旧环境变量。
 
-        ``Y8Y_NOTIFY_LINE_TARGETS`` 只服务两类人: 升级后从未自助绑定过的
-        老用户, 以及绑定已解除但**从未明确解绑**的历史状态 (不存在)。
-        一旦用户点过「解除绑定」, 通知侧会写一条持久化的
-        ``unlinked-<hash>.json`` 墓碑 —— 这里看到墓碑就直接返回空串,
-        **绝不自动恢复向旧 LINE 地址推送** (P0-1)。
+        P0-1: 用户点「解除绑定」的那一刻, Web 只在 inbox 写一条
+        ``unlink-*`` 请求, 正式删绑定/写墓碑要等 Webhook 后台线程。若此时
+        Webhook 服务离线, 绑定与旧 ``Y8Y_NOTIFY_LINE_TARGETS`` 都还在,
+        单靠墓碑会让通知继续发往旧地址。所以**调度器每轮解析收件人时
+        第一个检查的就是有效的待处理解绑请求** —— 命中即返回空串,
+        ``available_for(user)`` 随之变 False, 该用户在调度循环里被整体跳过。
+
+        该请求没有 TTL: Webhook 离线多久就停发多久; 恢复后由通知侧写成
+        持久化 ``unlinked-*`` 墓碑, 语义不变。只有「从未自助绑定、也从未
+        解绑」的老用户才回退旧环境变量 (升级兼容)。
 
         冲突时的处理由 ``Y8Y_NOTIFY_LINE_CONFLICT_POLICY`` 决定, 且一定
         **可见**: 能力表里的 ``line_conflicts`` 会让 Web 界面显示冲突提示。
         ``strict`` 下直接不返回目标 (fail closed), 一条都不发。
         """
+        # 第一优先级: 任何形式的解绑意图都立刻停发, 与 Webhook 是否在线无关。
+        if self._links.has_unlink_request(user):
+            return ''
+        if self._links.unlinked(user) is not None:
+            return ''
         bound, legacy = self._sources(user)
         if bound and legacy and bound != legacy:
             if getattr(self.config, 'line_conflict_policy', 'binding') == 'strict':
                 return ''
-        if bound:
-            return bound
-        if self._links.unlinked(user) is not None:
-            return ''
-        return legacy or ''
+        return bound or legacy or ''
 
     def send(self, user, message):
+        # 与 target_for 同一套 fail-closed 判定: 已排队解绑时不发往任何地址。
+        if self._links.has_unlink_request(user) or \
+                self._links.unlinked(user) is not None:
+            raise ProviderError(f'LINE delivery stopped for user {user!r} '
+                                f'(explicit unlink)', retryable=False)
         if self.conflict_for(user) and \
                 getattr(self.config, 'line_conflict_policy', 'binding') == 'strict':
             raise ProviderError(

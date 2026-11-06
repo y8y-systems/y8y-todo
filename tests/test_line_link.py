@@ -535,6 +535,184 @@ def test_send_rechecks_binding_after_claim_so_unlink_wins(tmp_path):
     assert LINE_A not in json.dumps(sink)
 
 
+# ── P0-1 (第二轮): 待处理解绑请求本身就要立即停发 ─────────────────────
+def _scheduled_round(data, config, sink, when):
+    """跑一轮真实的定时调度 (共享任务 09:00, 提前 30 分钟 → 08:30 触发)。
+
+    每轮清掉去重状态, 让同一条提醒可以再次进入投递循环 —— 这样才能证明
+    「停发」是因为收件人被挡住, 而不是因为去重状态恰好把消息吞了。
+    """
+    state_path = Path(notify_state_dir(data)) / 'notification_state.json'
+    if state_path.exists():
+        state_path.unlink()
+    settings_store = SettingsStore(str(Path(notify_state_dir(data))
+                                       / 'notification_settings.json'))
+    enabled_line = notifications.normalize_settings(
+        _enabled(channels=('line',), lead_minutes=30))[0]
+    for user in ('alice', 'bob'):
+        settings_store.set(user, enabled_line)
+    return Scheduler(str(data), config,
+                     providers={'line': LineProvider(config, _transport(sink))},
+                     settings_store=settings_store,
+                     state_store=StateStore(str(state_path)),
+                     now=when, tz=TZ).run()
+
+
+def test_pending_unlink_stops_scheduled_notifications_while_webhook_is_offline(server):
+    """完整链路: Webhook 离线 → 解绑排队 → 定时通知触发 → 恢复写墓碑。
+
+    回归的是修复前的漏洞: ``target_for()`` 只看绑定与墓碑, Webhook 离线时
+    绑定还在、墓碑还没写, 于是旧 ``Y8Y_NOTIFY_LINE_TARGETS`` 又被启用。
+    """
+    _serve, _httpd, client, tmp = server
+    data = tmp / 'data'
+    store = line_link.LinkStore(str(data))
+    code, _ = _create_code(client)
+    assert _bind(store, code, LINE_B) == 'bound'
+    store.set_binding('bob', LINE_C, now=time.time())
+    _write_task(data, 'todo', 'shared.md', title='共享任务', due='2026-10-27',
+                due_time='09:00', owner='shared')
+    # 旧环境变量仍配着 alice 的**旧** LINE 账号, bob 的与绑定一致
+    config = _config(data, Y8Y_NOTIFY_LINE_TARGETS=f'alice={LINE_A},bob={LINE_C}')
+    sink = []
+    provider = LineProvider(config, _transport(sink))
+    assert provider.target_for('alice') == LINE_B
+
+    # 基线: 解绑前定时通知确实发给两个人
+    report = _scheduled_round(data, config, sink,
+                              datetime(2026, 10, 27, 8, 30, tzinfo=TZ))
+    assert {item[1]['to'] for item in sink} == {LINE_B, LINE_C}
+    assert {item['user'] for item in report['sent']} == {'alice', 'bob'}
+    sink.clear()
+
+    # ① Webhook 离线: 只发 DELETE, 不启动也不调用任何消费线程
+    status, body = client.delete('/todo/api/line-link', headers=ALICE)
+    assert status == 200 and body['state'] == 'unlinking'
+    assert store.has_unlink_request('alice') is True
+    assert line_link.unlink_requested(str(data), 'alice') is True
+    assert store.binding('alice') is not None          # 权威绑定还在
+    assert store.unlinked('alice') is None              # 墓碑还没写
+    assert provider.target_for('alice') == ''           # 但已经停发
+    assert provider.available_for('alice') is False
+    assert provider.target_for('bob') == LINE_C          # 不影响别人
+    assert client.post('/todo/api/line-test', {}, headers=ALICE)[0] == 409
+    assert client.post('/todo/api/line-link', {}, headers=ALICE)[0] == 409
+    hint = client.get('/todo/api/line-link', headers=ALICE)[1]['hint']
+    assert '已停止' in hint and '不会恢复' in hint
+
+    # ② 定时通知连续两轮触发: alice 一条都不发, 旧地址 LINE_A 绝不复活
+    for minute in (31, 35):
+        r = _scheduled_round(data, config, sink,
+                             datetime(2026, 10, 27, 8, minute, tzinfo=TZ))
+        assert {item[1]['to'] for item in sink} == {LINE_C}, minute
+        assert LINE_A not in json.dumps(sink) and LINE_B not in json.dumps(sink)
+        assert any(x.get('user') == 'alice' and
+                   x.get('reason') == 'no channel configured on the server'
+                   for x in r['skipped']), r['skipped']
+        sink.clear()
+
+    # ③ 测试推送 / 直接调用 send() 也 fail closed
+    with pytest.raises(ProviderError):
+        provider.send('alice', notifications.Message('test', 's', 'body'))
+    assert sink == []
+
+    # ④ Webhook 恢复: 消费请求 → 删绑定 + 写墓碑 + 清空请求
+    app, _sink, _cfg = _apply_unlink(store)
+    assert store.binding('alice') is None
+    assert store.unlinked('alice') is not None
+    assert store.has_unlink_request('alice') is False
+    assert app.consume_requests() == []
+    assert provider.target_for('alice') == ''           # 墓碑继续挡住旧地址
+    assert provider.available_for('alice') is False
+    r = _scheduled_round(data, config, sink,
+                         datetime(2026, 10, 27, 8, 40, tzinfo=TZ))
+    assert {item[1]['to'] for item in sink} == {LINE_C}
+    assert client.get('/todo/api/line-link', headers=ALICE)[1]['state'] == 'unlinked'
+
+
+def test_pending_unlink_never_falls_back_to_legacy_under_any_policy(tmp_path):
+    """两种冲突策略下, 排队中的解绑请求都压过绑定与旧环境变量。"""
+    for policy in ('binding', 'strict'):
+        data = tmp_path / ('data-' + policy)
+        store = line_link.LinkStore(str(data))
+        store.ensure()
+        store.set_binding('alice', LINE_B, now=time.time())
+        config = _config(data, Y8Y_NOTIFY_LINE_TARGETS='alice=' + LINE_A,
+                         Y8Y_NOTIFY_LINE_CONFLICT_POLICY=policy)
+        provider = LineProvider(config)
+        assert provider.target_for('alice') == ('' if policy == 'strict' else LINE_B)
+        store.request_unlink('alice')
+        assert provider.target_for('alice') == '', policy
+        assert provider.available_for('alice') is False, policy
+        with pytest.raises(ProviderError):
+            provider.send('alice', notifications.Message('test', 's', 'body'))
+
+
+def test_unlink_request_survives_gc_and_restarts(tmp_path):
+    """请求没有 TTL: 长时间停机也不能让旧地址自动复活。"""
+    data = tmp_path / 'data'
+    store = line_link.LinkStore(str(data))
+    store.ensure()
+    store.set_binding('alice', LINE_B, now=time.time())
+    store.request_unlink('alice')
+    path = Path(store.inbox_dir) / f'unlink-{line_link.digest("alice")}.json'
+    old = time.time() - 10 * line_link.STATE_FILE_TTL_SECONDS
+    os.utime(path, (old, old))
+    store.gc(now=time.time())
+    assert path.exists(), 'GC 不能删掉尚未消费的解绑请求'
+    assert store.has_unlink_request('alice') is True
+    config = _config(data, Y8Y_NOTIFY_LINE_TARGETS='alice=' + LINE_A)
+    assert LineProvider(config).target_for('alice') == ''
+    # 新进程 (调度器) 也能看到同一条请求
+    assert line_link.LinkStore(str(data)).has_unlink_request('alice') is True
+    # 恢复后仍能正常收敛
+    app = line_webhook.WebhookApp(config, store=store)
+    app.stop.set()
+    assert app.consume_requests() == []
+    assert store.unlinked('alice') is not None
+    assert not path.exists()
+
+
+def test_only_well_formed_unlink_requests_are_effective(tmp_path):
+    """inbox 是 Web 可写的: 内容不自洽的请求不能被当成有效意图。"""
+    data = tmp_path / 'data'
+    store = line_link.LinkStore(str(data))
+    store.ensure()
+    store.set_binding('alice', LINE_B, now=time.time())
+    config = _config(data, Y8Y_NOTIFY_LINE_TARGETS='alice=' + LINE_A)
+    provider = LineProvider(config)
+    path = Path(store.inbox_dir) / f'unlink-{line_link.digest("alice")}.json'
+    for bad in ({}, {'version': 1, 'user': 'alice'},
+                {'version': 9, 'user': 'alice', 'requested_at': time.time()},
+                {'version': 1, 'user': 'bob', 'requested_at': time.time()},
+                {'version': 1, 'user': 'alice', 'requested_at': 'yesterday'}):
+        path.write_text(json.dumps(bad), encoding='utf-8')
+        assert store.has_unlink_request('alice') is False, bad
+        assert provider.target_for('alice') == LINE_B, bad
+    store.request_unlink('alice')
+    assert provider.target_for('alice') == ''
+
+
+def test_forged_unlink_filename_cannot_unlink_another_user(tmp_path):
+    """文件名与内容不一致的请求必须被丢弃, 不能借通知侧之手解绑别人。"""
+    data = tmp_path / 'data'
+    store = line_link.LinkStore(str(data))
+    store.ensure()
+    store.set_binding('bob', LINE_C, now=time.time())
+    bogus = Path(store.inbox_dir) / 'unlink-bogus.json'
+    bogus.write_text(json.dumps({'version': 1, 'user': 'bob',
+                                 'requested_at': time.time()}), encoding='utf-8')
+    assert store.has_unlink_request('bob') is False
+    config = _config(data)
+    assert LineProvider(config).target_for('bob') == LINE_C
+    app = line_webhook.WebhookApp(config, store=store)
+    app.stop.set()
+    assert app.consume_requests() == []
+    assert not bogus.exists()
+    assert store.binding('bob') is not None
+    assert store.unlinked('bob') is None
+
+
 # ══════════════════════════════════════════════════════════════════════
 # 3. 安全
 # ══════════════════════════════════════════════════════════════════════

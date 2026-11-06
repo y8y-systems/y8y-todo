@@ -42,16 +42,26 @@ Web 账号 (``y8y``) 只能删除/改名**自己拥有的**条目, 不能把通�
 ``line-link/`` 没有写权限 (2750)。Web 仍能读 0644 的绑定文件来显示自己的
 状态 —— 应用层的按用户隔离由 ``status(user)`` 保证。
 
-此外通知侧启动时会调 ``verify_trusted_layout()`` 自检: 权威目录必须是
-真实目录、归自己所有、且 group/other 不可写 —— 不满足就 **fail closed**
-拒绝启动, 防止运维漏配或有人预先抢占目录名。
+此外通知侧启动时会调 ``verify_trusted_layout()`` 自检: **``notify/`` 本身
+也必须归通知侧账号所有** —— Linux 的 sticky 位不限制「目录所有者」删除
+别人的目录项, 若 ``notify/`` 归 Web 用户所有, 它照样能把 ``line-link/``
+挪走再伪冒一个。自检还覆盖三级目录的权限位与符号链接, 不满足就
+**fail closed** 拒绝启动, 防止运维漏配或有人预先抢占目录名。
 
-## 解绑墓碑 (P0-1)
+## 解绑的**两段式**语义 (P0-1)
 
-解绑不删文件了事: Web 只在 inbox 里放一个 ``unlink-*`` 请求, 由通知侧
-写一条持久化的 ``unlinked-*`` 墓碑。``LineProvider.target_for()`` 看到墓碑
-就**不再回退** ``Y8Y_NOTIFY_LINE_TARGETS``; 只有「从未绑定」的用户才用旧
-环境变量 (升级兼容)。重新绑定成功时墓碑被清除。
+1. Web 点「解除绑定」→ 只在 inbox 写一个 ``unlink-*`` **请求**。从这一刻起
+   ``LineProvider.target_for()`` 就直接返回空串 (fail closed): 哪怕 Webhook
+   服务离线、权威绑定还在、旧 ``Y8Y_NOTIFY_LINE_TARGETS`` 还配着, 调度器
+   也不会再向该用户发任何新的 LINE 通知。请求**没有 TTL**, Webhook 离线多久
+   就挡多久。
+2. Webhook 恢复 → 消费请求, 删绑定、写持久化 ``unlinked-*`` 墓碑、取消待发
+   测试、删请求文件。墓碑保证此后**永不回退**旧地址; 只有「从未绑定」的
+   用户才用旧环境变量 (升级兼容)。重新绑定成功时墓碑被清除。
+
+也就是说「已提出解绑」「明确解绑」「从未绑定」是三种状态, 前两种都停发,
+只有第三种能享受旧配置的升级兼容。GC 不删 ``unlink-*`` 请求, 避免离线
+久了自动「复活」旧地址。
 
 文件名里的 ``<hash>`` 一律是 ``sha256`` 十六进制串, 用户输入永远不会
 直接进文件名 (路径穿越 / 覆盖都不可能)。需要「读 + 判断 + 写」原子性的
@@ -247,20 +257,32 @@ class LinkStore:
     def verify_trusted_layout(self, uid=None):
         """通知侧启动自检 —— 返回空串表示 OK, 否则给出**脱敏**的失败原因。
 
-        fail closed: 权威目录必须由本进程自己拥有, 且 group/other 不可写。
-        这样即使有人抢先建了同名目录、或运维漏了 chmod, Webhook 服务也不会
-        在一个 Web 可写的目录里写绑定记录。
+        fail closed: ``notify/`` 与权威目录都必须由本进程自己拥有, 且
+        group/other 不可写。Linux 的 sticky 位**不限制目录所有者** —— 若
+        ``notify/`` 归 Web 用户所有, 它照样能 ``rmdir``/改名通知侧拥有的
+        ``line-link/`` 再伪冒一个 (sticky 挡不住, 属主检查才能挡住)。
+        三级目录都必须是真实目录, 不能是符号链接。
         """
         uid = os.geteuid() if uid is None else uid
         try:
             parent = os.lstat(self.notify_dir)
         except OSError:
             return 'notification state directory is missing'
-        # 没有 sticky 的话, Web 可以把通知侧拥有的 line-link/ 整个改名再伪冒一个。
-        if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode):
+        if stat.S_ISLNK(parent.st_mode):
+            return 'notification state directory is a symlink'
+        if not stat.S_ISDIR(parent.st_mode):
             return 'notification state directory is not a directory'
+        # P0-2: sticky 只约束「非目录属主」, 目录属主可以删别人的条目。
+        if parent.st_uid != uid:
+            return 'notification state directory is owned by a different uid'
         if not (parent.st_mode & stat.S_ISVTX):
             return 'notification state directory lost its sticky bit'
+        if parent.st_mode & 0o007:
+            return 'notification state directory is accessible by others'
+        if (parent.st_mode & 0o050) != 0o050:
+            return 'notification state directory is not traversable by the shared group'
+        if (parent.st_mode & 0o700) != 0o700:
+            return 'notification state directory is not writable by its owner'
         try:
             info = os.lstat(self.state_dir)
         except OSError:
@@ -273,14 +295,22 @@ class LinkStore:
             return 'trusted state directory is owned by a different uid'
         if info.st_mode & 0o022:
             return 'trusted state directory is group/other writable'
+        if (info.st_mode & 0o050) != 0o050:
+            return 'trusted state directory is not readable by the shared group'
         try:
             inbox = os.lstat(self.inbox_dir)
         except OSError:
             return 'request inbox is missing'
-        if not stat.S_ISDIR(inbox.st_mode) or stat.S_ISLNK(inbox.st_mode):
+        if stat.S_ISLNK(inbox.st_mode):
+            return 'request inbox is a symlink'
+        if not stat.S_ISDIR(inbox.st_mode):
             return 'request inbox is not a directory'
+        if inbox.st_uid != uid:
+            return 'request inbox is owned by a different uid'
         if (inbox.st_mode & 0o070) != 0o070:
             return 'request inbox is not writable by the shared group'
+        if inbox.st_mode & 0o002:
+            return 'request inbox is writable by others'
         return ''
 
     @contextlib.contextmanager
@@ -543,8 +573,26 @@ class LinkStore:
             'source': 'self',
         })
 
+    def unlink_request(self, user):
+        """**有效**的待处理解绑请求 (通知引擎据此立即停发), 否则 None。
+
+        文件住在 Web 可写的 inbox, 所以内容不能被盲信: 必须 version 正确、
+        ``user`` 与文件名里的哈希一致、且带一个数值型时间戳。伪造的请求
+        最多只能让某个用户**停发** (fail closed), 不能把通知改投别处。
+        请求**没有 TTL**: Webhook 离线多久就挡多久, 直到恢复后写成墓碑。
+        """
+        if not valid_user(user):
+            return None
+        data = self._read(self._path(f'unlink-{digest(user)}.json'))
+        if not data or data.get('version') != 1 or data.get('user') != user:
+            return None
+        requested_at = data.get('requested_at')
+        if not isinstance(requested_at, (int, float)):
+            return None
+        return data
+
     def has_unlink_request(self, user):
-        return self._read(self._path(f'unlink-{digest(user)}.json')) is not None
+        return self.unlink_request(user) is not None
 
     def request_unlink(self, user, now=None):
         """Web 侧: 只**提出**解绑请求, 绝不碰权威绑定/墓碑文件。"""
@@ -560,7 +608,18 @@ class LinkStore:
         return {'state': 'unlinking'}
 
     def pending_unlink_requests(self):
-        return self._entries('unlink-')
+        """列出所有 ``unlink-*`` 文件名; 内容损坏时 data 为 None (由消费方丢弃)。
+
+        不能用 ``_entries()`` 的过滤版: 一个坏文件如果永远不被消费, 会一直
+        留在 inbox 里。解绑请求不参与 TTL 清理 (见 ``gc``)。
+        """
+        try:
+            names = [n for n in os.listdir(self.inbox_dir)
+                     if n.startswith('unlink-') and n.endswith('.json')]
+        except OSError:
+            return []
+        return [(name, self._read(os.path.join(self.inbox_dir, name)))
+                for name in names]
 
     def read_unlink_request(self, name):
         return self._read(self._path(name))
@@ -591,7 +650,10 @@ class LinkStore:
         now = time.time() if now is None else now
         self.ensure()
         with self.lock():
-            if self.binding(user) is None or self.unlinked(user) is not None:
+            # 「已提出解绑」与「明确解绑」都不能再排队测试推送 —— 通知引擎
+            # 此刻已经停发, 排队只会产生一条注定失败的假请求。
+            if (self.binding(user) is None or self.unlinked(user) is not None
+                    or self.has_unlink_request(user)):
                 return None, 'not_bound'
             state = self._read(self._path('test-rate.json')) or {}
             history = state.get('history') if isinstance(state.get('history'), dict) else {}
@@ -757,7 +819,10 @@ class LinkStore:
                     else:
                         events.append((at, path))
                     continue
-                if name.startswith(('code-', 'result-', 'test-', 'unlink-')) \
+                # unlink-* 绝不按 TTL 删除: Webhook 离线时它必须一直挡住旧
+                # 地址, 直到恢复后被消费成永久墓碑。否则长时间停机会自动
+                # 「复活」旧 LINE 目标。损坏的请求由 consume_requests() 丢弃。
+                if name.startswith(('code-', 'result-', 'test-')) \
                         and name.endswith('.json'):
                     try:
                         age = now - os.path.getmtime(path)
@@ -786,3 +851,8 @@ def bound_users(data_dir):
 def explicitly_unlinked(data_dir, user):
     """是否**明确解绑**过 (墓碑)。通知引擎据此禁止回退旧地址。"""
     return LinkStore(data_dir).unlinked(user) is not None
+
+
+def unlink_requested(data_dir, user):
+    """是否**已提出但尚未完成**解绑。通知引擎据此立即停发 (Webhook 离线也生效)。"""
+    return LinkStore(data_dir).unlink_request(user) is not None

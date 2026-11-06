@@ -20,6 +20,9 @@
 #           --shell /usr/sbin/nologin y8y-notify
 #   sudo usermod --append --groups y8y-notify y8y
 #   sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
+#   sudo chown y8y-notify:y8y-notify /var/lib/y8y-todo/notify
+#        ↑ ⚠️ sticky 不限制目录所有者: 父目录归 Web 用户所有时, 权限位
+#          3770/2750/2770 全对也挡不住 Web 删掉 line-link/ 再伪冒一个。
 #   sudo install -d -o y8y-notify -g y8y-notify -m 2750 \
 #           /var/lib/y8y-todo/notify/line-link
 #   sudo install -d -o y8y-notify -g y8y-notify -m 2770 \
@@ -29,6 +32,8 @@
 #   sudo cp /opt/y8y-todo/packaging/y8y-todo-line-webhook.service \
 #           /etc/systemd/system/y8y-todo-line-webhook.service
 #   sudo -e /etc/y8y-todo/y8y-todo-notify.env      # 填 Channel Secret + Token
+#   sudo python3 /opt/y8y-todo/scripts/check-notify-isolation.py \
+#           --data-dir /var/lib/y8y-todo --line-link-layout  # C8, 退出码须 0
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now y8y-todo-line-webhook.service
 #   sudo journalctl -u y8y-todo-line-webhook.service -n 30 --no-pager
@@ -61,7 +66,8 @@ ProtectHome=true
 ReadWritePaths=-/var/lib/y8y-todo/notify
 PrivateTmp=true
 # 两个服务账号靠共享组读写 line-link-inbox/ 里的请求; 权威目录 line-link/
-# 是 2750, Web 只能读不能写。服务启动会自检目录属主与权限, 不合格拒绝启动。
+# 是 2750, Web 只能读不能写。服务启动会自检**三级目录的属主、权限与符号
+# 链接** (含 <notify>/ 父目录属主), 不合格拒绝启动 (fail closed)。
 UMask=0022
 TimeoutStopSec=10
 

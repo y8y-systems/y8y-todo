@@ -257,18 +257,26 @@ class WebhookApp:
 
         Web 侧只往 inbox 写 ``unlink-*`` 请求, 从不碰权威目录。所有动作在
         同一把跨进程锁里完成, 与 ``consume_tests`` 的认领互斥。
+
+        inbox 是 Web 可写的: 文件名与内容都必须校验, 否则 A 用户可以塞一个
+        内容为 ``user=bob`` 的请求, 借通知侧之手把 B 用户解绑。只有
+        ``unlink-<sha256(user)>.json`` 且内容自洽才算有效请求。
         """
-        for name, _request in self.store.pending_unlink_requests():
+        for name, _listed in self.store.pending_unlink_requests():
             with self.store.lock():
                 request = self.store.read_unlink_request(name)
                 if request is None:
-                    continue                       # 已被别的线程处理
+                    # 已被别的线程消费, 或文件损坏 —— 后者要删掉, 免得永远留着。
+                    self.store.drop_unlink_request(name)
+                    continue
                 user = request.get('user')
-                if not line_link.valid_user(user):
+                expected = (f'unlink-{line_link.digest(user)}.json'
+                            if line_link.valid_user(user) else '')
+                if not expected or name != expected:
                     self.store.drop_unlink_request(name)
                     continue
                 self.store.apply_unlink(user)
-        return self.store.pending_unlink_requests()
+        return [(n, d) for n, d in self.store.pending_unlink_requests() if d is not None]
 
     # -- 测试推送队列 ---------------------------------------------------
     def consume_tests(self):
@@ -445,7 +453,11 @@ def main(argv=None):
         # fail closed: 权威绑定目录归错人 / 组可写时绝不启动。
         print(f'[line-webhook] 绑定状态目录权限自检失败，拒绝启动: {exc}',
               file=sys.stderr)
-        print('  请按 docs/line-self-link.md §4 重建目录 (2750 / 2770) 后重启。',
+        print('  请按 docs/line-self-link.md §4 重建 3770 / 2750 / 2770 三级目录,',
+              file=sys.stderr)
+        print('  确认 <notify>/ 父目录属主是 y8y-notify (sticky 不限制目录所有者),',
+              file=sys.stderr)
+        print('  并用 check-notify-isolation.py --line-link-layout 复核后重启。',
               file=sys.stderr)
         return 2
     httpd = make_server(app, bind, port)

@@ -276,14 +276,142 @@ def test_web_unlink_request_is_only_a_request(tmp_path):
 # ══════════════════════════════════════════════════════════════════════
 # 3. 跨 UID: CI 的 root 演练脚本必须覆盖这几条 (静态钉死)
 # ══════════════════════════════════════════════════════════════════════
+# ── P0-2 (第二轮): <data>/notify/ 的属主 ──────────────────────────────
+def _checker_module():
+    import importlib.util
+    path = ROOT / 'scripts' / 'check-notify-isolation.py'
+    spec = importlib.util.spec_from_file_location('check_notify_isolation', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_verify_trusted_layout_checks_parent_owner_before_anything_else(tmp_path):
+    """sticky 不限制目录所有者 —— 父目录属主必须是通知侧可信 UID。"""
+    store = line_link.LinkStore(str(tmp_path / 'data'))
+    store.ensure_trusted()
+    assert store.verify_trusted_layout() == ''
+    # 用另一个 uid 运行 (= 父目录归别人) → 第一个失败原因必须是父目录属主。
+    problem = store.verify_trusted_layout(uid=os.getuid() + 1)
+    assert problem == 'notification state directory is owned by a different uid'
+
+
+def test_verify_trusted_layout_rejects_web_owned_parent_even_with_sticky(tmp_path, monkeypatch):
+    """只把 notify/ 的属主换成别人, 其余全合规 —— 仍必须 fail closed。"""
+    store = line_link.LinkStore(str(tmp_path / 'data'))
+    store.ensure_trusted()
+    real_lstat = os.lstat
+
+    def fake_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if os.fspath(path) == store.notify_dir:
+            values = list(tuple(info)[:10])
+            values[4] = info.st_uid + 1           # st_uid
+            result = os.stat_result(tuple(values))
+            return result
+        return info
+
+    monkeypatch.setattr(os, 'lstat', fake_lstat)
+    assert store.verify_trusted_layout() == \
+        'notification state directory is owned by a different uid'
+    monkeypatch.undo()
+    assert store.verify_trusted_layout() == ''
+
+
+def test_verify_trusted_layout_rejects_symlinked_parent(tmp_path):
+    data = tmp_path / 'data'
+    data.mkdir()
+    (tmp_path / 'elsewhere').mkdir()
+    os.symlink(str(tmp_path / 'elsewhere'), str(data / 'notify'))
+    store = line_link.LinkStore(str(data))
+    assert store.verify_trusted_layout() == \
+        'notification state directory is a symlink'
+
+
+def test_verify_trusted_layout_checks_parent_mode_bits(tmp_path):
+    store = line_link.LinkStore(str(tmp_path / 'data'))
+    store.ensure_trusted()
+    for mode, expected in ((0o2770, 'lost its sticky bit'),
+                           (0o3777, 'accessible by others'),
+                           (0o3700, 'not traversable by the shared group')):
+        os.chmod(store.notify_dir, mode)
+        assert expected in store.verify_trusted_layout(), (oct(mode),
+                                                          store.verify_trusted_layout())
+    os.chmod(store.notify_dir, 0o3770)
+    assert store.verify_trusted_layout() == ''
+
+
+def test_verify_trusted_layout_rejects_web_owned_inbox(tmp_path, monkeypatch):
+    store = line_link.LinkStore(str(tmp_path / 'data'))
+    store.ensure_trusted()
+    real_lstat = os.lstat
+
+    def fake_lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if os.fspath(path) == store.inbox_dir:
+            values = list(tuple(info)[:10])
+            values[4] = info.st_uid + 1
+            return os.stat_result(tuple(values))
+        return info
+
+    monkeypatch.setattr(os, 'lstat', fake_lstat)
+    assert 'request inbox is owned by a different uid' in store.verify_trusted_layout()
+    monkeypatch.undo()
+    assert store.verify_trusted_layout() == ''
+
+
+def test_operator_precheck_catches_web_owned_parent(tmp_path):
+    """Operator 用的独立审计脚本也必须报同一个问题 (不能只靠运行时自检)。"""
+    checker = _checker_module()
+    store = line_link.LinkStore(str(tmp_path / 'data'))
+    store.ensure_trusted()
+    uid = os.getuid()
+    assert checker._line_link_layout_problems(store.notify_dir, uid, uid + 1) == []
+    problems = checker._line_link_layout_problems(store.notify_dir, uid + 1, uid)
+    assert problems and 'notify' in problems[0]
+    assert 'Web 用户所有' in problems[0]
+    assert 'sticky' in problems[0]
+
+
+def test_operator_precheck_catches_symlinks_and_bad_modes(tmp_path):
+    checker = _checker_module()
+    uid = os.getuid()
+    store = line_link.LinkStore(str(tmp_path / 'data'))
+    store.ensure_trusted()
+    os.chmod(store.notify_dir, 0o2770)               # 去掉 sticky
+    assert any('sticky' in p for p in
+               checker._line_link_layout_problems(store.notify_dir, uid, uid + 1))
+    os.chmod(store.notify_dir, 0o3770)
+    assert checker._line_link_layout_problems(store.notify_dir, uid, uid + 1) == []
+
+    # 符号链接顶替权威目录同样要被拒绝
+    bad = tmp_path / 'symlinked'
+    bad.mkdir(mode=0o3770)
+    (bad / 'line-link-inbox').mkdir(mode=0o2770)
+    (bad / 'line-link-real').mkdir()
+    os.symlink(str(bad / 'line-link-real'), str(bad / 'line-link'))
+    problems = checker._line_link_layout_problems(bad, uid, uid + 1)
+    assert any('符号链接' in p for p in problems), problems
+
+
 def test_ci_cross_uid_fixture_covers_the_new_layout():
     script = (ROOT / 'tests' / 'linux_notify_acl.sh').read_text(encoding='utf-8')
     workflow = (ROOT / '.github' / 'workflows' / 'ubuntu-2204.yml').read_text(
         encoding='utf-8')
     assert 'sudo bash tests/linux_notify_acl.sh' in workflow
     for marker in ('line-link', 'line-link-inbox', 'chmod 3770',
-                   'binding-forged', 'test -r', 'binding-x.json'):
+                   'binding-forged', 'test -r', 'binding-x.json',
+                   # P0-2: 真实跨 UID 复现 sticky 对目录所有者无效
+                   'bad_notify', 'install -d -o "$web" -g "$notify" -m 3770',
+                   'rmdir "$bad_notify/line-link-empty"',
+                   'verify_trusted_layout()', '--line-link-layout',
+                   '_line_link_layout_problems', 'C8 LINE'):
         assert marker in script, f'CI 跨 UID 演练缺少 {marker}'
+    checker = (ROOT / 'scripts' / 'check-notify-isolation.py').read_text(
+        encoding='utf-8')
+    assert '--line-link-layout' in checker
+    assert 'C8 LINE 绑定目录属主/权限' in checker
+    assert 'sticky 挡不住目录所有者' in checker
 
 
 def test_deployment_docs_declare_the_split_layout():

@@ -48,6 +48,29 @@ def test_caddyfile_example_exists_and_is_documented():
     assert 'header_up' in text and 'reverse_proxy' in text
 
 
+# ── P1: 示例不能关掉 HTTPS, 也不能诱导覆盖既有配置 ────────────────────
+def test_example_never_disables_automatic_https():
+    """``auto_https off`` 只属于离线测试环境, 绝不能出现在生产示例里。
+
+    注释里可以解释它, 但**生效的指令**里不能有任何全局选项块。
+    """
+    text = CADDYFILE.read_text(encoding='utf-8')
+    active = [stripped for _no, stripped, _depth in _blocks(text)]
+    assert all('auto_https' not in line for line in active), \
+        '示例里出现了生效的 auto_https 指令 —— 复制到生产会关掉自动 HTTPS'
+    assert all(not line.startswith('{') for line in active), \
+        '示例不应包含全局选项块 (只能合并进现有 Caddyfile 的站点块)'
+
+
+def test_example_warns_against_overwriting_the_production_caddyfile():
+    text = CADDYFILE.read_text(encoding='utf-8')
+    for marker in ('参考片段', '禁止整体复制覆盖生产配置', '合并进现有的站点块',
+                   '不要整文件覆盖', '只适用于离线测试', 'HTTP→HTTPS 重定向'):
+        assert marker in text, f'示例缺少防误用提示: {marker}'
+    # 不能出现「直接 cp 到 /etc/caddy/Caddyfile」的正面指令
+    assert '#   ❌ cp packaging/Caddyfile.line-webhook.example /etc/caddy/Caddyfile' in text
+
+
 def test_header_up_is_nested_inside_reverse_proxy():
     """每条 header_up 都必须处在某个 reverse_proxy { ... } 块内部。"""
     lines = _blocks(CADDYFILE.read_text(encoding='utf-8'))
@@ -123,6 +146,28 @@ def test_caddy_adapt_produces_exact_match_and_header_stripping():
     assert '8087' in blob and '8086' in blob
     assert '"static_response"' in blob          # 前缀 404
     assert '"forward_auth"' in blob or 'X-Forwarded-Method' in blob
+
+
+@pytest.mark.skipif(_caddy_bin() is None, reason='本机/CI 未提供 caddy 二进制')
+def test_caddy_adapt_keeps_automatic_https_enabled(tmp_path):
+    """真实 Caddy: 示例不得产生 ``automatic_https.disable = true``。"""
+    proc = subprocess.run(
+        [_caddy_bin(), 'adapt', '--config', str(CADDYFILE), '--adapter', 'caddyfile'],
+        capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    server = json.loads(proc.stdout)['apps']['http']['servers']['srv0']
+    assert server.get('automatic_https', {}).get('disable') is not True
+
+    # 负对照: 加上测试专用的全局选项, Caddy 就真的关掉了自动 HTTPS。
+    control = tmp_path / 'test-only.caddyfile'
+    control.write_text('{\n\tauto_https off\n}\n\n' +
+                       CADDYFILE.read_text(encoding='utf-8'), encoding='utf-8')
+    ctrl = subprocess.run(
+        [_caddy_bin(), 'adapt', '--config', str(control), '--adapter', 'caddyfile'],
+        capture_output=True, text=True, timeout=30)
+    assert ctrl.returncode == 0, ctrl.stderr
+    ctrl_server = json.loads(ctrl.stdout)['apps']['http']['servers']['srv0']
+    assert ctrl_server['automatic_https']['disable'] is True
 
 
 @pytest.mark.skipif(_caddy_bin() is None, reason='本机/CI 未提供 caddy 二进制')

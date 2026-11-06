@@ -4227,8 +4227,9 @@ function renderLineLink() {
     return;
   }
   if (s.state === 'unlinking') {
-    // 解绑是通知侧异步落墓碑; 期间不给任何操作入口, 等轮询翻到 unlinked。
-    stateEl.textContent = '正在解除绑定…';
+    // 通知已从排队那一刻起停发 (Webhook 离线也生效); 墓碑由通知侧异步补齐。
+    // 期间不给任何操作入口, 等轮询翻到 unlinked。
+    stateEl.textContent = '已停止 LINE 通知，正在解除绑定…';
     return;
   }
   if (s.state === 'error') {

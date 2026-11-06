@@ -306,9 +306,16 @@ precedence ... and no rule is inherited」** —— 更具体的路径应用优�
 
 `header_up` 是 **`reverse_proxy` 的子指令**，必须写在 `reverse_proxy { ... }`
 块内；放在 `handle` 里 Caddy 会直接报 `unrecognized directive: header_up`。
-完整、可直接 `caddy validate` 的配置见
-[`packaging/Caddyfile.line-webhook.example`](../packaging/Caddyfile.line-webhook.example)，
+[`packaging/Caddyfile.line-webhook.example`](../packaging/Caddyfile.line-webhook.example)
+是一份已通过 `caddy validate` 的**参考片段**（占位域名 + 单个站点块），
 要点如下（`handle` 带 matcher 的块必须排在兜底 `handle` **之前**）：
+
+> ⚠️ **不要整文件覆盖 `/etc/caddy/Caddyfile`**。先备份，再把下面 3 个
+> matcher / handle 合并进现有站点块，保留原有全局选项、TLS/证书配置、其它
+> 站点与其它路由。示例**故意不含全局选项**，尤其没有 `auto_https off` ——
+> 那只是离线语法测试用的开关，复制到生产会关掉自动 HTTPS 与 HTTP→HTTPS
+> 重定向。`tests/test_caddy_webhook_config.py` 用真实 `caddy adapt` 做了
+> 「示例不得产生 `automatic_https.disable=true`」的回归与负对照。
 
 ```caddyfile
 todo.example.com {
@@ -347,7 +354,10 @@ todo.example.com {
 完全一致 —— **普通 Todo API 的认证链没有被放宽**。上线前执行：
 
 ```bash
+sudo cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%s)
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo systemctl reload caddy
+curl -I http://todo.example.com/        # 仍应 301/308 跳到 HTTPS
 ```
 
 #### nginx
@@ -372,7 +382,9 @@ location ^~ /line/webhook/ { deny all; }
 
 #### 验证清单
 
+- [ ] 已备份原 Caddyfile 并**合并**（不是覆盖）路由；示例的 `auto_https off` 没被带进生产
 - [ ] `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile` → Valid configuration
+- [ ] `curl -I http://todo.example.com/` → 仍跳 HTTPS（自动 HTTPS 未被关闭）
 - [ ] `curl -i -X POST https://todo.example.com/line/webhook -d '{}'` → **401**（缺签名被拒，说明路径通且 Access 放行正确）
 - [ ] `curl -i https://todo.example.com/line/webhook/anything` → **404**（Bypass 前缀没落进 Todo 应用）
 - [ ] LINE Developers → Webhook → **Verify** → Success
@@ -594,8 +606,10 @@ sudo useradd --system --user-group --no-create-home \
 sudo usermod --append --groups y8y-notify y8y
 sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
 # 已有目录: sudo chmod 3770 /var/lib/y8y-todo/notify  (补 sticky 位, 见 §5.2.4)
+# ⚠️ 属主必须是 y8y-notify: sticky 不限制目录所有者 (见 §5.1 / C8)
+sudo chown y8y-notify:y8y-notify /var/lib/y8y-todo/notify
 # 启用 LINE 自助绑定时还要建 2750 的 line-link/ 与 2770 的 line-link-inbox/
-# (见 §5.1 与 docs/line-self-link.md §4)
+# (见 §5.1 与 docs/line-self-link.md §4), 并跑 --line-link-layout 前置审计
 # Apply the task ACLs and restart Web as described in §5.2.6 before proceeding.
 ```
 
@@ -763,9 +777,11 @@ path `/line/webhook` (see §3.5). It is the only component that reads
 for the test push, so there is no second LINE API client.
 
 ```bash
-# ⚠️ 三级目录权限是安全边界, 不是可选优化 (详见 docs/line-self-link.md §4):
+# ⚠️ 三级目录的**权限与属主**都是安全边界, 不是可选优化
+#    (详见 docs/line-self-link.md §4):
 sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
 sudo chmod 3770 /var/lib/y8y-todo/notify                    # 已有目录补 sticky
+sudo chown y8y-notify:y8y-notify /var/lib/y8y-todo/notify   # chmod 不改属主!
 sudo install -d -o y8y-notify -g y8y-notify -m 2750 \
         /var/lib/y8y-todo/notify/line-link                  # 权威: Web 只读
 sudo install -d -o y8y-notify -g y8y-notify -m 2770 \
@@ -775,6 +791,12 @@ sudo usermod --append --groups y8y-notify y8y
 sudo cp /opt/y8y-todo/packaging/y8y-todo-line-webhook.service \
         /etc/systemd/system/y8y-todo-line-webhook.service
 sudo systemctl daemon-reload
+
+# 启动之前跑一次 Operator 前置审计 (C8 会核验三级目录属主/权限/符号链接):
+sudo python3 /opt/y8y-todo/scripts/check-notify-isolation.py \
+        --unit-dir /etc/systemd/system \
+        --env-file /etc/y8y-todo/y8y-todo-notify.env \
+        --data-dir /var/lib/y8y-todo --line-link-layout   # 退出码必须 0
 sudo systemctl enable --now y8y-todo-line-webhook.service
 ```
 
@@ -789,18 +811,26 @@ a recipient without any verified LINE webhook. Creating, replacing or deleting
 a file needs write permission on the **parent directory**, so the authoritative
 records now live in `line-link/` (`2750`, Web has only `r-x`) while Web writes
 its requests to `line-link-inbox/` (`2770`). The **sticky** bit on `notify/`
-(`3770`) stops Web from renaming the notification-owned `line-link/` directory
-and putting a fake one in its place. The webhook service verifies ownership
-and mode at startup and **fails closed** if they are wrong; a real cross-UID
-probe runs in CI via `sudo bash tests/linux_notify_acl.sh`.
+(`3770`) stops *non-owner* Web processes from renaming the notification-owned
+`line-link/` directory and putting a fake one in its place — but Linux sticky
+**does not restrict the directory owner**. Hence `notify/` itself **must be
+owned by `y8y-notify`**; a Web-owned parent with otherwise perfect
+`3770/2750/2770` modes still lets Web `rmdir` the authoritative directory and
+recreate it. `verify_trusted_layout()` checks parent ownership, sticky/other
+bits, symlinks and all three owners at startup and **fails closed**; the
+Operator precheck `check-notify-isolation.py --line-link-layout` (C8)
+independently audits the same layout before enabling the unit. A real
+cross-UID A/B exploit reproduction runs in CI via
+`sudo bash tests/linux_notify_acl.sh`.
 
 `Y8Y_NOTIFY_LINE_TARGETS` remains as a **fallback only for users who never
-self-bound**, so an upgrade never silently removes anyone's notifications.
-A user who explicitly unlinks gets a persistent `unlinked-*` tombstone and
-**never falls back** to the old address (P0-1). When a binding and the old
-variable disagree, the conflict is published in the capability table (user
-ids only) and shown in the settings UI; set
-`Y8Y_NOTIFY_LINE_CONFLICT_POLICY=strict` to fail closed instead.
+self-bound and never unlinked**, so an upgrade never silently removes anyone's
+notifications. A pending `unlink-*` request stops delivery **immediately** —
+even while the webhook service is offline — and the persistent `unlinked-*`
+tombstone written after recovery **never falls back** to the old address
+(P0-1). When a binding and the old variable disagree, the conflict is
+published in the capability table (user ids only) and shown in the settings
+UI; set `Y8Y_NOTIFY_LINE_CONFLICT_POLICY=strict` to fail closed instead.
 
 ### 5.2 Credential isolation (process permissions)
 
@@ -922,14 +952,24 @@ the shared group and the setgid bit set:
 
 ```bash
 sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
-# 已有部署补 sticky: sudo chmod 3770 /var/lib/y8y-todo/notify
+# 已有部署补 sticky + 属主 (chmod 不会改属主):
+sudo chmod 3770 /var/lib/y8y-todo/notify
+sudo chown y8y-notify:y8y-notify /var/lib/y8y-todo/notify
 ```
 
 The extra `1` (sticky bit) is required by LINE self-service linking (§5.1):
-it stops the web account from renaming/deleting the notification-owned
-`line-link/` directory that holds authoritative LINE bindings. It does not
-change the existing notification files: each service still replaces only the
-files it owns.
+it stops a *non-owner* web account from renaming/deleting the
+notification-owned `line-link/` directory that holds authoritative LINE
+bindings. It does not change the existing notification files: each service
+still replaces only the files it owns.
+
+⚠️ **Sticky does not restrict the directory owner.** If `notify/` is owned by
+`y8y` (Web) instead of `y8y-notify`, Web can still `rmdir` / rename `line-link/`
+and recreate a fake one — even with all three modes exactly `3770/2750/2770`.
+Ownership is therefore a hard requirement, checked both at Webhook startup
+(`verify_trusted_layout()`) and by the Operator precheck
+`check-notify-isolation.py --line-link-layout` (C8). CI reproduces this with
+two real UIDs in `tests/linux_notify_acl.sh`.
 
 | file | written by | read by | how |
 | --- | --- | --- | --- |
@@ -955,10 +995,12 @@ Why each piece is there:
   the group, so the file one account writes stays readable by the
   other even after `os.replace()` swaps in a fresh inode. Without it
   the group would revert to the writer's primary group on every write.
-- **sticky (the `1`)** — a group member may delete/rename only files it
-  **owns**. This is what protects the notification-owned `line-link/`
-  authoritative binding directory (§5.1) from being swapped out by the
-  web account. It also means each service replaces only its own files:
+- **sticky (the `1`)** — a group member *who does not own the directory*
+  may delete/rename only files it **owns**. Together with the
+  `y8y-notify` ownership of `notify/` this protects the notification-owned
+  `line-link/` authoritative binding directory (§5.1) from being swapped
+  out by the web account. It also means each service replaces only its own
+  files:
   Web owns `notification_settings.json`, the scheduler owns
   `notification_state.json` / `notification_channels.json` /
   `notification.lock`. Do not create one of these as root and leave it
@@ -1092,7 +1134,10 @@ sudo useradd --system --user-group --no-create-home \
 sudo usermod --append --groups y8y-notify y8y
 sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
 # 已有部署: sudo chmod 3770 /var/lib/y8y-todo/notify  (补 sticky 位)
+# ⚠️ 属主必须是 y8y-notify —— sticky 不限制目录所有者, 见 §5.1 / C8:
+sudo chown y8y-notify:y8y-notify /var/lib/y8y-todo/notify
 # LINE 自助绑定 (可选): 2750 line-link/ + 2770 line-link-inbox/, 见 §5.1
+#   启用时先跑 check-notify-isolation.py --line-link-layout (退出码须为 0)
 # Create the two task roots as Web if absent, preserving existing directories.
 sudo -u y8y mkdir -p /var/lib/y8y-todo/todo /var/lib/y8y-todo/recurring
 # Only traversal at the private root: no listing or writing.
@@ -1174,6 +1219,7 @@ sudo python3 scripts/check-notify-isolation.py \
 | C5 | both task trees and Markdown files are accessible, state directory writable, root not writable and internal token inaccessible |
 | C6 | the web user can read the capability table and write the preferences |
 | C7 | the notify unit's writable paths do **not** cover the whole data directory |
+| C8 | LINE binding layout: `notify/` is owned by the **notify** account (Linux sticky does not restrict the directory owner), plus mode bits, all three owners and symlinks. Auto-enabled when the Webhook unit is installed; force with `--line-link-layout` |
 
 Exit codes: `0` = all checks passed, `1` = a check failed, `2` = a
 check could not be verified (for example C4 needs root and Linux `/proc`). **`2` is not a pass.** Checks that cannot be decided are
@@ -1185,7 +1231,11 @@ permission probe cannot be decided (dropping privileges failed, the
 helper process did not start), the result is `UNKNOWN` — never "OK".
 
 `--repo-packaging` makes the script audit the unit templates in
-`packaging/` instead of the installed ones — useful for CI.
+`packaging/` instead of the installed ones — useful for CI. It is a
+*template* self-check, so C8 (a host-data-directory check) is skipped there
+unless you also pass `--line-link-layout`. Deploying the Webhook service on a
+real host requires the combined precheck in §5.1 to return `0` before enabling
+the unit.
 
 ## 6. Upgrading from versions with Google Calendar
 

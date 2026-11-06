@@ -97,3 +97,79 @@ runuser -u "$notify" -- test -r "$inbox/unlink-x.json"
 runuser -u "$notify" -- sh -c 'printf "ok" > "$1/result-x.json"; rm -f "$1/code-x.json"' sh "$inbox"
 runuser -u "$web" -- test -r "$inbox/result-x.json"
 echo "OK: LINE 绑定目录跨 UID 权限 (读允许 / 伪造·替换·删除·改名拒绝)"
+
+# ── P0-2: 父目录属主 —— Linux sticky 不限制「目录所有者」 ─────────────
+# 构造一个权限位**完全合规** (3770 / 2750 / 2770) 但 notify/ 归 Web 用户
+# 所有的部署。若只检查 sticky 而不验属主, 这个错误配置会蒙混过关。
+bad_data="$fixture/bad-data"
+install -d -o "$web" -g "$notify" -m 0755 "$bad_data"
+bad_notify="$bad_data/notify"
+install -d -o "$web" -g "$notify" -m 3770 "$bad_notify"
+install -d -o "$notify" -g "$notify" -m 2750 "$bad_notify/line-link"
+install -d -o "$notify" -g "$notify" -m 2770 "$bad_notify/line-link-inbox"
+
+# A/B: 同一个通知侧拥有的空权威目录, 父目录属主不同 → sticky 效果不同。
+install -d -o "$notify" -g "$notify" -m 2750 "$notify_dir/line-link-empty"
+install -d -o "$notify" -g "$notify" -m 2750 "$bad_notify/line-link-empty"
+if runuser -u "$web" -- rmdir "$notify_dir/line-link-empty" 2>/dev/null; then
+  echo "FAIL: 父目录归通知侧时 sticky 没挡住 Web 删权威目录"; exit 1
+fi
+if ! runuser -u "$web" -- rmdir "$bad_notify/line-link-empty" 2>/dev/null; then
+  echo "FAIL: 没能复现 sticky 对目录所有者无效 (检查 rmdir 语义)"; exit 1
+fi
+# 复现攻击: 删掉通知侧目录后原地重建一个 Web 自己拥有的, 再伪造绑定文件。
+runuser -u "$web" -- mkdir "$bad_notify/line-link-empty"
+runuser -u "$web" -- sh -c 'printf "forged\n" > "$1/binding-forged.json"' \
+  sh "$bad_notify/line-link-empty"
+grep -q forged "$bad_notify/line-link-empty/binding-forged.json"
+runuser -u "$web" -- test -w "$bad_notify/line-link-empty/binding-forged.json"
+echo "OK: 父目录归 Web 时 sticky 不足以保护权威目录 (已实测可伪造绑定)"
+
+# 产品自检必须 fail closed, 且失败原因明确指向 **父目录** 属主。
+install -m 0644 "$repo/src/line_link.py" "$fixture/code/line_link.py"
+if ! runuser -u "$notify" -- python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import line_link
+problem = line_link.LinkStore(sys.argv[2]).verify_trusted_layout()
+assert "notification state directory is owned by a different uid" in problem, problem
+' "$fixture/code" "$bad_data"; then
+  echo "FAIL: Webhook 启动自检没有拒绝 Web 拥有的 notify/ 父目录"; exit 1
+fi
+if ! runuser -u "$notify" -- python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import line_link
+problem = line_link.LinkStore(sys.argv[2]).verify_trusted_layout()
+assert problem == "", problem
+' "$fixture/code" "$fixture/data"; then
+  echo "FAIL: 合规布局被启动自检误拒"; exit 1
+fi
+
+# Operator 部署前置检查 (C8) 也必须抓到同一个错误配置。
+python3 - "$repo/scripts" "$bad_notify" "$notify" "$web" <<'PY'
+import importlib.util
+import pwd
+import sys
+spec = importlib.util.spec_from_file_location(
+    'checker', sys.argv[1] + '/check-notify-isolation.py')
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+nuid = pwd.getpwnam(sys.argv[3]).pw_uid
+wuid = pwd.getpwnam(sys.argv[4]).pw_uid
+problems = mod._line_link_layout_problems(sys.argv[2], nuid, wuid)
+assert any('notify' in p and 'Web' in p for p in problems), problems
+PY
+echo "OK: 父目录属主检查 (启动自检 fail closed + Operator 前置检查 C8)"
+
+# 合规布局跑一次完整的前置检查 (先把 C5 用过的 ACL 复原)。
+setfacl -m u:y8y-notify:--- "$fixture/data/internal_tokens.json"
+if ! python3 "$repo/scripts/check-notify-isolation.py" \
+      --unit-dir "$fixture/units" --env-file "$fixture/notify.env" \
+      --data-dir "$fixture/data" --line-link-layout > "$fixture/c8-check"; then
+  echo "FAIL: 合规布局没通过带 C8 的 Operator 前置检查"
+  cat "$fixture/c8-check"
+  exit 1
+fi
+grep -q 'C8 LINE 绑定目录属主/权限' "$fixture/c8-check"
+echo "OK: Operator 前置检查 --line-link-layout 在合规部署上通过"

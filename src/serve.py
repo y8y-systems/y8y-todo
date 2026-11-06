@@ -142,7 +142,9 @@ def line_link_status(user):
     if not status['available']:
         status['hint'] = '服务器尚未启用 LINE 自助绑定（请联系管理员部署 Webhook 服务）。'
     elif status['state'] == 'unlinking':
-        status['hint'] = '正在解除绑定，请稍候。'
+        # 待处理解绑请求从排队那一刻起就已经停发 (与 Webhook 是否在线无关)。
+        status['hint'] = ('已停止向你发送 LINE 通知；正在等待通知服务完成解绑，'
+                          '旧的服务器配置不会恢复推送。')
     elif status['state'] == 'unlinked':
         # 关键: 明确解绑后旧环境变量里的收件人不会被自动恢复。
         status['hint'] = ('已解除绑定。服务器旧的 LINE 配置不会再向你推送；'

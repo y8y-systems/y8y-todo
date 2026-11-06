@@ -145,6 +145,12 @@ def main():
                 timeout=8000)
             check('解绑进入过渡态',
                   '正在解除绑定' in page.locator('#lineLinkState').inner_text())
+            check('过渡态明确告知通知已停发',
+                  '已停止' in page.locator('#lineLinkState').inner_text(),
+                  page.locator('#lineLinkState').inner_text())
+            check('过渡态提示旧配置不会恢复',
+                  '不会恢复' in page.locator('#lineLinkHint').inner_text(),
+                  page.locator('#lineLinkHint').inner_text())
             check('Web 只写了请求, 权威绑定仍在', store.binding('dev') is not None)
             check('Web 没有写解绑墓碑', store.unlinked('dev') is None)
 

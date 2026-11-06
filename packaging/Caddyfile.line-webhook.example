@@ -1,7 +1,21 @@
-# y8y Todo —— LINE Webhook 独立公开入口 (Caddy 2)
+# y8y Todo —— LINE Webhook 独立公开入口 (Caddy 2) —— **参考片段, 不是可覆盖的配置**
 #
-# 复制到 /etc/caddy/Caddyfile 后请先做语法验证:
-#   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+# ⚠️ 禁止整体复制覆盖生产配置:
+#   ❌ cp packaging/Caddyfile.line-webhook.example /etc/caddy/Caddyfile
+#   本文件只有一个占位站点 (todo.example.com) 与 3 个路由片段, 用来做
+#   离线语法验证与评审。生产上必须把它们**合并进现有的站点块**, 保留原有
+#   全局选项、TLS/证书配置、其它站点和其它路由:
+#     sudo cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%s)
+#     # 手工合并下面的 3 个 matcher / handle, 不要整文件覆盖
+#     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+#     sudo systemctl reload caddy
+#
+# ⚠️ 本文件**不含任何全局选项**, 尤其没有 `auto_https off`:
+#   该选项只适用于离线测试 (占位域名领不到真实证书)。生产配置里若带上它,
+#   会关掉 Caddy 的自动 HTTPS 及 HTTP→HTTPS 重定向, 站点可能降级为明文
+#   HTTP。切勿把测试环境的全局选项一起复制到生产。
+#   离线自检: caddy validate --config packaging/Caddyfile.line-webhook.example
+#             --adapter caddyfile
 #
 # 三条硬规则:
 #   1. 只有「精确路径 /line/webhook + POST」转发到常驻 Webhook 服务 (8087)。
@@ -15,9 +29,6 @@
 #
 # 与 docs/deployment.md §3 Option B 的认证链保持一致 (oauth2-proxy 例子);
 # 用 Cloudflare Access / Authelia 时替换成对应的 forward_auth 提供端即可。
-{
-	auto_https off
-}
 
 todo.example.com {
 	@line_webhook_post {
