@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from config import Config
+import line_link
 
 # Notification preferences (per user) + the channel capability table.
 #
@@ -104,6 +105,10 @@ PERSISTENT_PROJECTS_FILE = str(CONFIG.persistent_projects_file)
 # 通知: 每用户偏好 + 渠道能力表 (调度器发布, 只读)
 NOTIFICATION_SETTINGS_FILE = os.path.join(TODOLIST_DIR, NOTIFY_DIR_NAME, 'notification_settings.json')
 NOTIFICATION_CHANNELS_FILE = os.path.join(TODOLIST_DIR, NOTIFY_DIR_NAME, 'notification_channels.json')
+# LINE 自助绑定: 只读写 <data>/notify/line-link/ 里的无凭据状态文件。
+# Web 进程**不持有** Channel Secret / Access Token —— 详见 line_link.py。
+LINE_LINK_STORE = line_link.LinkStore(TODOLIST_DIR)
+_LINE_API_PATHS = ('/todo/api/line-link', '/todo/api/line-test')
 
 
 def notification_settings_payload(user):
@@ -119,6 +124,39 @@ def notification_settings_payload(user):
                  if not available else ''),
     }
 
+
+def line_link_status(user):
+    """当前用户的 LINE 自助绑定视图 (不含完整 LINE ID, 不含任何凭据)。
+
+    「旧环境变量是否还配着」与「新旧是否冲突」来自调度器发布的**无凭据**
+    能力表 —— Web 进程不读 Y8Y_NOTIFY_* 环境变量。
+    """
+    caps = Capabilities(NOTIFICATION_CHANNELS_FILE)
+    status = LINE_LINK_STORE.status(
+        user,
+        bot_id=CONFIG.line_bot_id,
+        legacy=user in caps.line_legacy_users(),
+        conflict=user in caps.line_conflicts(),
+        enabled=LINE_LINK_STORE.capabilities_enabled(),
+    )
+    if not status['available']:
+        status['hint'] = '服务器尚未启用 LINE 自助绑定（请联系管理员部署 Webhook 服务）。'
+    elif status['state'] == 'unlinking':
+        # 待处理解绑请求从排队那一刻起就已经停发 (与 Webhook 是否在线无关)。
+        status['hint'] = ('已停止向你发送 LINE 通知；正在等待通知服务完成解绑，'
+                          '旧的服务器配置不会恢复推送。')
+    elif status['state'] == 'unlinked':
+        # 关键: 明确解绑后旧环境变量里的收件人不会被自动恢复。
+        status['hint'] = ('已解除绑定。服务器旧的 LINE 配置不会再向你推送；'
+                          '重新绑定后才会恢复通知。')
+    elif status['legacy_conflict']:
+        status['hint'] = ('自助绑定已生效；旧的 LINE 环境变量配置与它指向不同账号，'
+                          '已被忽略。建议管理员移除旧配置。')
+    elif status['legacy']:
+        status['hint'] = '当前由旧的服务器环境变量提供收件人；自助绑定后可自行管理。'
+    else:
+        status['hint'] = ''
+    return status
 
 
 # ── 安全工具 ────────────────────────────────────────────────────────────
@@ -837,6 +875,25 @@ class TodolistHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(notification_settings_payload(user))
             return
 
+        # API: LINE 自助绑定状态 / 测试推送结果 (每用户隔离)
+        if path == '/todo/api/line-link':
+            user = self._current_user()
+            if user is None:
+                self._send_error('Unauthorized', 401)
+                return
+            self._send_json(line_link_status(user))
+            return
+
+        if path == '/todo/api/line-test':
+            user = self._current_user()
+            if user is None:
+                self._send_error('Unauthorized', 401)
+                return
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            rid = (query.get('id') or [''])[0]
+            self._send_json(LINE_LINK_STORE.test_status(rid, user))
+            return
+
         # API: list tasks
         if path == '/todo/api/tasks':
             user = self._current_user()
@@ -1015,6 +1072,16 @@ class TodolistHandler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self._parse_path()
+        # 新 API 只接受极小的 JSON (两个布尔字段 / 空对象)。先查长度再读,
+        # 超大请求体不进内存, 也不会被当成合法绑定请求。
+        if path in _LINE_API_PATHS:
+            try:
+                _length = int(self.headers.get('Content-Length', 0) or 0)
+            except (TypeError, ValueError):
+                _length = 0
+            if _length > line_link.WEB_BODY_LIMIT:
+                self._send_error('Request body too large', 413)
+                return
         body_data = self._read_body()
 
         # Google Calendar 集成已移除: 与 do_GET 一致, 先于鉴权给出 410。
@@ -1029,6 +1096,37 @@ class TodolistHandler(http.server.BaseHTTPRequestHandler):
         user = self._current_user()
         if user is None:
             self._send_error('Unauthorized', 401)
+            return
+
+        # API: LINE 自助绑定 —— 创建一次性绑定码 (仅已认证用户)
+        if path == '/todo/api/line-link':
+            replace = bool(body_data.get('replace')) if isinstance(body_data, dict) else False
+            current = line_link_status(user)
+            if current['state'] == 'bound' and not replace:
+                self._send_json({'error': '该账号已绑定 LINE，请先解除绑定或选择「更换」。',
+                                 'state': 'bound'}, 409)
+                return
+            if current['state'] == 'unlinking':
+                self._send_json({'error': '正在解除绑定，请稍后再试。',
+                                 'state': 'unlinking'}, 409)
+                return
+            payload, err = LINE_LINK_STORE.create_code(
+                user, replace=replace, bot_id=CONFIG.line_bot_id)
+            if err:
+                self._send_json({'error': line_link.ERROR_MESSAGES[err], 'code': err}, 429)
+                return
+            self._send_json(payload)
+            return
+
+        # API: 发送测试通知 —— 只排队, 由持有凭据的 Webhook 服务执行
+        if path == '/todo/api/line-test':
+            payload, err = LINE_LINK_STORE.queue_test(user)
+            if err:
+                codes = {'rate_limited': 429, 'not_bound': 409, 'forbidden': 403}
+                self._send_json({'error': line_link.ERROR_MESSAGES[err], 'code': err},
+                                codes.get(err, 400))
+                return
+            self._send_json(payload)
             return
 
         # 列表系统: 新建列表 (每个列表可设归属 self/shared)
@@ -1654,6 +1752,13 @@ class TodolistHandler(http.server.BaseHTTPRequestHandler):
             self._send_error('Unauthorized', 401)
             return
 
+        # API: 提出解绑请求 (只能解绑自己)。Web 只往 inbox 写请求,
+        # 权威绑定/墓碑由通知侧 Webhook 服务写入 —— 见 line_link.py。
+        if path == '/todo/api/line-link':
+            LINE_LINK_STORE.request_unlink(user)
+            self._send_json(line_link_status(user))
+            return
+
         # 列表系统: 删除整个列表
         m_listdel = re.match(r'^/todo/api/lists/([^/]+)$', path)
         if m_listdel:
@@ -1756,8 +1861,12 @@ def _cleanup_stale_tmp_files():
     if not os.path.isdir(TODOLIST_DIR):
         return
     notify_dir = os.path.abspath(os.path.join(TODOLIST_DIR, NOTIFY_DIR_NAME))
-    for root, _dirs, files in os.walk(TODOLIST_DIR):
-        if os.path.abspath(root) == notify_dir:
+    for root, dirs, files in os.walk(TODOLIST_DIR):
+        # 整个通知子树 (包含 line-link/ 等子目录) 都要跳过 —— 只比
+        # 顶层目录相等的话, os.walk 还是会钻进子目录删掉别人的 .tmp。
+        if os.path.abspath(root) == notify_dir or \
+                os.path.abspath(root).startswith(notify_dir + os.sep):
+            dirs[:] = []
             continue
         for fn in files:
             if fn.endswith('.tmp'):

@@ -33,6 +33,9 @@ Environment reference (see docs/deployment.md for details):
                        comma-separated identity ids that see Chinese
                        holidays by default; empty = every user (the UI
                        still lets each user override locally)
+  Y8Y_LINE_BOT_ID     LINE Bot Basic ID (public, NOT a credential) used to
+                       build the "open the official bot chat" deep link for
+                       self-service LINE account linking. Empty = no link.
 
 历史说明: Google Calendar 集成已于 2026-10 移除 (用户决定不再使用)。
 旧数据目录里的 google_calendar/ 与任务 frontmatter 的 task_uid /
@@ -95,6 +98,11 @@ class Config:
 
         self.public_url = env.get('Y8Y_PUBLIC_URL', '').strip().rstrip('/')
         self.timezone = env.get('Y8Y_TIMEZONE', 'Asia/Tokyo').strip() or 'Asia/Tokyo'
+
+        # LINE Bot Basic ID —— **公开信息, 不是凭据**, 只用来生成
+        # 「打开官方 Bot 聊天」的 Deep Link。真正的 Channel Secret /
+        # Access Token 只在独立的 Webhook 服务的环境里, 见 line_webhook.py。
+        self.line_bot_id = env.get('Y8Y_LINE_BOT_ID', '').strip()
 
         self.users = parse_users(env.get('Y8Y_USERS', ''))
         self.auth_header = env.get('Y8Y_AUTH_HEADER', 'Cf-Access-Authenticated-User-Email').strip()

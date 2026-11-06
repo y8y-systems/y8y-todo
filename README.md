@@ -96,6 +96,7 @@ secrets in the repo). Highlights:
 | `Y8Y_CN_HOLIDAYS` | `1` | Chinese-holiday display in the calendar (master switch) |
 | `Y8Y_CN_HOLIDAY_USERS` | *(empty = all users)* | comma-separated identity ids that see Chinese holidays by default |
 | `Y8Y_DEV_MODE` | *(off)* | single local user, forced loopback |
+| `Y8Y_LINE_BOT_ID` | *(empty)* | LINE Bot Basic ID — **public, not a credential**; only used to build the "open the bot chat" deep link |
 
 Full reference: [docs/deployment.md](docs/deployment.md).
 
@@ -108,7 +109,10 @@ the Web process never holds a LINE token or an API key:
 | --- | --- | --- |
 | `Y8Y_NOTIFY_ENABLED` | `0` | master switch for the whole notification subsystem |
 | `Y8Y_NOTIFY_LINE_TOKEN` | *(empty)* | LINE Messaging API channel access token |
-| `Y8Y_NOTIFY_LINE_TARGETS` | *(empty)* | `user=LINE-user-id,...` — who gets LINE |
+| `Y8Y_NOTIFY_LINE_TARGETS` | *(empty)* | **legacy fallback only** — `user=LINE-user-id,...`; self-service binding replaces it (see [LINE 自助绑定](#line-自助绑定-v1)) |
+| `Y8Y_NOTIFY_LINE_CHANNEL_SECRET` | *(empty)* | LINE Channel Secret — read **only** by the separate webhook service, to verify `X-Line-Signature` |
+| `Y8Y_NOTIFY_LINE_WEBHOOK_BIND` / `_PORT` | `127.0.0.1` / `8087` | loopback listener for the webhook service; never expose it directly |
+| `Y8Y_NOTIFY_LINE_CONFLICT_POLICY` | `binding` | `binding` (self-binding wins, conflict shown in UI) or `strict` (stop sending until the stale env entry is removed) |
 | `Y8Y_NOTIFY_EMAIL_API_KEY` | *(empty)* | Resend API key |
 | `Y8Y_NOTIFY_EMAIL_FROM` | *(empty)* | verified sender address |
 | `Y8Y_NOTIFY_EMAIL_TARGETS` | *(empty)* | `user=mail@example.com,...` — overrides the `Y8Y_USERS` address |
@@ -297,7 +301,9 @@ at all; there is no retry, no catch-up and no second chance.
 sudo useradd --system --user-group --no-create-home \
         --shell /usr/sbin/nologin y8y-notify
 sudo usermod --append --groups y8y-notify y8y
-sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
+# 已有部署: sudo chmod 3770 /var/lib/y8y-todo/notify
+# (sticky 位保护 LINE 自助绑定的权威目录, 见「LINE 自助绑定 V1」§9)
 # Apply the task ACLs and perform the controlled Web restart in
 # docs/deployment.md §5.2.6 before continuing.
 
@@ -398,6 +404,187 @@ sudo systemctl start y8y-todo-notify.timer
 Do **not** simply move the state file aside and let the scheduler rebuild
 it: that throws away the entire dedup history, and every reminder that
 already went out will be sent again.
+
+## LINE 自助绑定 (V1)
+
+每个合法的 Todo 用户可以**自己**在「设置 → 通知 → LINE」里绑定、测试、解绑、
+更换 LINE 账号。管理员只需要配置一次 LINE Messaging API，之后不需要为每个用户
+手动写 `Y8Y_NOTIFY_LINE_TARGETS`。
+
+> 完整架构、权限模型、Cloudflare Access 配置、迁移与排错见
+> [docs/line-self-link.md](docs/line-self-link.md) 与
+> [docs/deployment.md §3.5](docs/deployment.md#35-为-line-webhook-开一个独立的公开入口)。
+
+### 1. 创建 LINE Messaging API Channel
+
+在 [LINE Developers Console](https://developers.line.biz/console/) 建 Provider →
+「Messaging API」Channel。记下三样东西：
+
+| 项 | 位置 | 性质 |
+| --- | --- | --- |
+| **Channel Secret** | Basic settings | **凭据**，只放通知侧 env 文件 |
+| **Channel access token (long-lived)** | Messaging API 页底部 | **凭据**，只放通知侧 env 文件 |
+| **Bot Basic ID**（形如 `@123abcde`） | Basic settings | 公开信息，放 Web 的 env 文件 |
+
+关闭「Auto-reply messages」和「Greeting messages」（否则 Bot 会抢答），打开
+「Use webhooks」。
+
+### 2. 配置凭据
+
+```bash
+# /etc/y8y-todo/y8y-todo-notify.env   (root:root 600, 只有通知侧进程读)
+Y8Y_NOTIFY_ENABLED=1
+Y8Y_NOTIFY_LINE_TOKEN=<channel access token>
+Y8Y_NOTIFY_LINE_CHANNEL_SECRET=<channel secret>
+Y8Y_NOTIFY_LINE_WEBHOOK_BIND=127.0.0.1
+Y8Y_NOTIFY_LINE_WEBHOOK_PORT=8087
+
+# /etc/y8y-todo/y8y-todo.env         (Web 自己的 env, 不含任何凭据)
+Y8Y_LINE_BOT_ID=@123abcde
+```
+
+**Web 进程不持有 Channel Secret 也不持有 Access Token** —— 这是既有安全设计，
+本功能没有改变它。三个进程分别跑在 `y8y`（Web）、`y8y-notify`（调度器 +
+Webhook）两个系统用户下。
+
+### 3. 配置 Webhook URL 与独立公开入口
+
+在 LINE Developers → Messaging API → Webhook URL 填：
+
+```
+https://todo.example.com/line/webhook
+```
+
+**只给这一个精确路径开 Cloudflare Access 的 Bypass**，其它路径的认证策略一个字
+都不改（不要为了 Webhook 关掉整个应用的 Access）。按官方《Application paths》，
+更具体的路径应用优先且不继承宽泛应用规则；但 Bypass 应用是**路径根**，会连带
+覆盖 `/line/webhook/...` 子路径，且 Bypass 请求不记 Access 日志、不施加任何
+Access 安全控制 —— 所以必须：① Caddy 只把「精确路径 + POST」转发到 `8087`，
+其余该前缀的请求直接 404；② 配 WAF Rate Limiting；③ 保留普通 API 的
+`forward_auth`。body 不能改写 —— 签名是对原始字节算的。
+
+已通过 `caddy validate` 的**参考片段**见
+[`packaging/Caddyfile.line-webhook.example`](packaging/Caddyfile.line-webhook.example)，
+说明见 [docs/deployment.md §3.5](docs/deployment.md#35-为-line-webhook-开一个独立的公开入口)。
+⚠️ Caddy 的 `header_up` 必须写在 `reverse_proxy { ... }` **块内**（它是
+`reverse_proxy` 的子指令），放在 `handle` 里配置根本起不来。
+
+⚠️ **不要整文件覆盖 `/etc/caddy/Caddyfile`**：先备份，再把示例里的 3 个
+matcher / handle 合并进现有站点块，保留原有全局选项、TLS 配置与其它站点。
+示例**不含全局选项**、尤其没有 `auto_https off` —— 那是离线语法测试用的，
+带进生产会关掉自动 HTTPS 与 HTTP→HTTPS 重定向。
+
+### 4. 启用自助绑定（新增一个常驻服务）
+
+```bash
+# 0. 先按 §9 建立 3770 / 2750 / 2770 三级目录与属主, 并跑 --line-link-layout 前置审计
+sudo cp /opt/y8y-todo/packaging/y8y-todo-line-webhook.service \
+        /etc/systemd/system/y8y-todo-line-webhook.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now y8y-todo-line-webhook.service
+```
+
+已有的 `y8y-todo.service`、`y8y-todo-notify.timer` **不用改**。Webhook 服务只监听
+回环、只接受 `POST /line/webhook`，其它路径一律 404；启动时会自检权威目录的
+属主与权限，不合格就拒绝启动（fail closed）。
+
+### 5. 验证 Webhook
+
+```bash
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile   # Valid configuration
+curl -I http://todo.example.com/                                  # 仍应跳 HTTPS
+sudo systemctl status y8y-todo-line-webhook.service
+curl -i -X POST https://todo.example.com/line/webhook -d '{}'   # 期望 401（缺签名）
+curl -i https://todo.example.com/line/webhook/anything           # 期望 404
+# LINE Developers → Webhook → 「Verify」应为 Success
+# 另开一个路径确认 Access 仍然生效：
+curl -i https://todo.example.com/todo/api/tasks                 # 应被 Access 拦截
+```
+
+### 6. 用户如何绑定
+
+设置 → 通知 → LINE → **绑定 LINE** → 点「打开 LINE」（或复制绑定码）→ 在
+**与官方 Bot 的一对一聊天**里粘贴发送绑定码 → 网页自动变成「LINE：已连接」。
+
+绑定码由安全随机数生成、10 分钟有效、只能用一次，全程不需要输入 LINE User ID，
+也不需要管理员参与。V1 只提供 Deep Link + 复制（不引入二维码依赖）；取舍见
+[docs/line-self-link.md §2](docs/line-self-link.md#2-进程与数据流)。
+
+### 7. 测试推送与解绑
+
+已连接后点「发送测试通知」—— 固定文本，只能发给当前用户已绑定的 LINE 账号，
+60 秒最多 1 条、1 小时最多 5 条。点「解除绑定」后**通知立刻停发**（Webhook
+服务离线也一样，旧服务器配置不会被恢复），网页显示「已停止 LINE 通知，正在
+解除绑定…」，约 0.4 秒后变成「未绑定（已解绑）」：通知侧会写一条**持久化
+解绑墓碑**，并删掉绑定记录。排队中尚未发送的测试通知会被取消。点「更换
+LINE 账号」可直接重新绑定另一个 LINE 账号，重新绑定成功后墓碑清除、通知恢复。
+
+### 8. 已有的 `Y8Y_NOTIFY_LINE_TARGETS` 怎么办
+
+**优先级固定**：
+
+1. **已提出解绑**（请求还在队列里）→ 立刻停发，Webhook 离线也生效；
+2. **明确解绑过**（有墓碑）→ 停发，**不回退**旧环境变量；
+3. 有自助绑定 → 用它；
+4. **从未绑定、也从未解绑** → 回退到旧环境变量（升级兼容，旧用户不会突然收不到通知）。
+
+第 1/2 条保证「解除绑定」的语义不会被旧配置悄悄推翻 —— 尤其在 Webhook
+停机、绑定记录尚未删除、墓碑尚未写入的那段时间。两者指向不同 LINE 账号
+时不会静默二选一：默认 `binding` 以用户自助绑定为准，并把冲突写进能力表、
+在设置页显示提示；设 `Y8Y_NOTIFY_LINE_CONFLICT_POLICY=strict` 则该用户停发，
+直到管理员移除旧条目。建议每个用户自助绑定成功并测试通过后，管理员再从 env
+里删掉该用户的 `user=Uxxxx` 条目并重启 Webhook 服务。详见
+[docs/line-self-link.md §8](docs/line-self-link.md#8-旧-y8y_notify_line_targets-的迁移)。
+
+### 9. 数据、权限与备份
+
+数据分成**两级目录**，权限就是安全边界（Web 绝不能写权威绑定文件）：
+
+| 目录 | 权限 | 内容 |
+| --- | --- | --- |
+| `<notify>/` | `3770`（setgid + **sticky**），**属主必须是 `y8y-notify`** | 原有三个通知 JSON；sticky 阻止**非属主**的 Web 挪走通知侧拥有的目录 |
+| `<notify>/line-link/` | `2750` | **权威**：`binding-*`、解绑墓碑 `unlinked-*`、`capabilities.json`（Web 只读） |
+| `<notify>/line-link-inbox/` | `2770` | 请求队列：绑定码、解绑请求、测试通知（Web 可写） |
+
+```bash
+sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
+sudo chmod 3770 /var/lib/y8y-todo/notify            # 已有目录补 sticky
+sudo chown y8y-notify:y8y-notify /var/lib/y8y-todo/notify   # chmod 不改属主!
+sudo install -d -o y8y-notify -g y8y-notify -m 2750 \
+        /var/lib/y8y-todo/notify/line-link
+sudo install -d -o y8y-notify -g y8y-notify -m 2770 \
+        /var/lib/y8y-todo/notify/line-link-inbox
+
+# ⚠️ 装好 Webhook 单元、启动之前, 以 root 跑一次前置审计 (退出码须为 0):
+sudo python3 /opt/y8y-todo/scripts/check-notify-isolation.py \
+        --unit-dir /etc/systemd/system \
+        --env-file /etc/y8y-todo/y8y-todo-notify.env \
+        --data-dir /var/lib/y8y-todo --line-link-layout
+```
+
+创建 / 替换 / 删除文件只需要**父目录写权限**，所以 `2750` 的权威目录从根上
+挡住了「Web 伪造 / 替换 / 删除绑定」。⚠️ **Linux 的 sticky 不限制目录所有者**：
+若 `<notify>/` 归 Web 用户所有，即使三级权限位全对，Web 仍能删掉 `line-link/`
+再伪冒一个。因此父目录属主是硬前置条件，启动自检 `verify_trusted_layout()`
+和上面的 C8 前置审计都会核验它（含权限位与符号链接），不合格就**拒绝启动**。
+跟着 `<data_dir>` 一起备份即可；恢复后按上表重建目录权限与属主。跨 UID 的
+真实攻击链复现见 [docs/line-self-link.md §4](docs/line-self-link.md#4-数据文件与权限p0-2-核心)。
+
+### 10. 常见错误
+
+| 现象 | 处理 |
+| --- | --- |
+| 按钮显示「尚未启用」 | Webhook 服务没跑 / 能力表超过 5 分钟没更新 / 状态目录权限不对 |
+| journal 出现「绑定状态目录权限自检失败」 | 按 §9 重建三级目录**并确认 `<notify>/` 属主是 `y8y-notify`**（sticky 挡不住目录所有者）；跑 `--line-link-layout` 前置审计（服务会 fail closed，不会带病启动） |
+| 发了码一直「等待确认」 | 是否在群聊里发的；Access 是否只放行 `/line/webhook`；Caddy 的 `header_up` 是否写在 `reverse_proxy` 块内（否则配置根本起不来）；代理是否改写了 body |
+| Verify 失败 | Channel Secret 填错、`X-Line-Signature` 被剥掉、body 被重序列化 |
+| 「LINE 账号已绑定其他用户」 | 一个 LINE 账号只能绑一个 Todo 用户，让对方先解绑 |
+| 「旧配置已被忽略」 | 按 §8 移除该用户的旧 env 条目 |
+| 解绑后停在「已停止 LINE 通知，正在解除绑定…」 | Webhook 服务没在跑或写不了 `line-link/`；**通知已停发**，恢复服务会自动补写墓碑，看 journal 与目录属主 |
+| 上线后 HTTP 不再跳 HTTPS | 是否把示例的 `auto_https off`（仅测试用）或整个示例文件复制进了生产 Caddyfile；示例不含该选项 |
+| 普通 API 不再要求认证 | 检查 Cloudflare Access 是否误给整站开了 Bypass；Caddy 的兜底 `handle` 必须保留 `forward_auth` |
+
+完整排错表见 [docs/line-self-link.md §10](docs/line-self-link.md#10-常见错误与排查)。
 
 ## Backups, restore, upgrades
 

@@ -62,11 +62,14 @@ is ever served unauthenticated.
 | `Y8Y_DEV_USER` | `dev` | identity used in dev mode |
 | `Y8Y_CN_HOLIDAYS` | `1` | master switch for the Chinese-holiday display in the calendar |
 | `Y8Y_CN_HOLIDAY_USERS` | *(empty = all)* | comma-separated identity ids that see Chinese holidays by default |
+| `Y8Y_LINE_BOT_ID` | *(empty)* | LINE Bot Basic ID — **public, not a credential**; only used to build the "open the official bot chat" deep link for self-service LINE binding |
 
 The notification subsystem has **its own** variables, read only by the
-scheduler process — see [§ 5.1 Notifications](#51-notifications-optional).
+scheduler process and the LINE webhook process — see
+[§ 5.1 Notifications](#51-notifications-optional) and
+[docs/line-self-link.md](line-self-link.md).
 They are intentionally *not* in the table above: the web service must
-never be able to read a LINE token or an email API key.
+never be able to read a LINE token, a Channel Secret or an email API key.
 
 ### User mapping
 
@@ -260,6 +263,134 @@ That is a misconfiguration, not a bypass: the app still refuses it.
       the header from addresses in `Y8Y_TRUSTED_PROXIES`
       (`tests/test_auth.py` locks this, including `X-Forwarded-For`
       spoofing).
+
+### 3.5 为 LINE Webhook 开一个独立的公开入口
+
+LINE 官方服务器必须能 POST 到 `/line/webhook`，但**这不代表整个 Todo 应用可以
+绕过 Cloudflare Access**。V1 用第三个进程把两类认证彻底分开：
+
+| 进程 | 用户 | 监听 | 认证 |
+| --- | --- | --- | --- |
+| `y8y-todo.service` | `y8y` | `127.0.0.1:8086` | Todo 用户（Access / 身份头 / 机器 Token） |
+| `y8y-todo-line-webhook.service` | `y8y-notify` | `127.0.0.1:8087` | **只有** `X-Line-Signature`（HMAC-SHA256 over raw body） |
+| `y8y-todo-notify.service` | `y8y-notify` | 无（timer 一次性） | 系统账号 + env 文件 |
+
+Webhook 服务**只**接受 `POST /line/webhook`，其它路径/方法一律 404；它没有任何
+调用 Todo 内部 API 的客户端。两个进程只通过 `<data>/notify/line-link/`
+（权威，2750，**只有通知侧可写**）与 `<data>/notify/line-link-inbox/`
+（请求队列，2770，Web 可写）下的单写者文件通信（见
+`docs/line-self-link.md §2/§4`）。
+
+#### Cloudflare Access
+
+Cloudflare 官方《Application paths》：**「the more specific rule takes
+precedence ... and no rule is inherited」** —— 更具体的路径应用优先，且不继承
+宽泛应用的规则。据此：
+
+1. 主应用 `todo.example.com`（Path 留空）的 Allow 策略**保持不变**。
+2. 新建 Application：Path = `/line/webhook`，Policy =
+   **Bypass / Include Everyone / Everyone**（官方给公开端点推荐写法）。
+3. ⚠️ 路径应用是**路径根**，Bypass 会连带覆盖 `/line/webhook/...` 子路径；
+   这些请求不经过 Access 认证，所以必须在 Caddy 层直接 404（见下）。
+   Bypass 请求**不记入 Access 日志、也不施加任何 Access 安全控制**，安全性完全
+   依赖应用层 HMAC 验签 —— 务必配 WAF Rate Limiting 限制该路径 POST 频率。
+4. Access 应用路径不支持查询串 / `#` 锚点，端口会被剥离重定向；Webhook URL 填
+   `https://todo.example.com/line/webhook` 即可。
+5. ⚠️ 不要把认证**只**交给 Cloudflare：Bypass 前缀下的请求仍会到达反向代理，
+   而 Access 此时不再注入身份头。反向代理必须保留自己的 `forward_auth`
+   （或等价认证）并在公开入口剥掉客户端自带的身份头 / 机器 Token；
+   Bypass 前缀下的其它请求一律在代理层 404。
+6. 不要给 `/todo/*` 或整站开 Bypass；不要把 8087 端口直接暴露到公网。
+
+#### Caddy
+
+`header_up` 是 **`reverse_proxy` 的子指令**，必须写在 `reverse_proxy { ... }`
+块内；放在 `handle` 里 Caddy 会直接报 `unrecognized directive: header_up`。
+[`packaging/Caddyfile.line-webhook.example`](../packaging/Caddyfile.line-webhook.example)
+是一份已通过 `caddy validate` 的**参考片段**（占位域名 + 单个站点块），
+要点如下（`handle` 带 matcher 的块必须排在兜底 `handle` **之前**）：
+
+> ⚠️ **不要整文件覆盖 `/etc/caddy/Caddyfile`**。先备份，再把下面 3 个
+> matcher / handle 合并进现有站点块，保留原有全局选项、TLS/证书配置、其它
+> 站点与其它路由。示例**故意不含全局选项**，尤其没有 `auto_https off` ——
+> 那只是离线语法测试用的开关，复制到生产会关掉自动 HTTPS 与 HTTP→HTTPS
+> 重定向。`tests/test_caddy_webhook_config.py` 用真实 `caddy adapt` 做了
+> 「示例不得产生 `automatic_https.disable=true`」的回归与负对照。
+
+```caddyfile
+todo.example.com {
+	@line_webhook_post {
+		path /line/webhook          # 精确匹配 (加尾部 * 才是前缀)
+		method POST
+	}
+	handle @line_webhook_post {
+		reverse_proxy 127.0.0.1:8087 {
+			# 剥掉客户端伪造的机器 Token 与身份头; 不改写 body,
+			# X-Line-Signature 默认原样透传。
+			header_up -X-Internal-Token
+			header_up -Cf-Access-Authenticated-User-Email
+		}
+	}
+
+	# Bypass 前缀下的其它请求直接拒绝, 绝不能掉进 Todo 应用 handle
+	@line_webhook_prefix path /line/webhook /line/webhook/*
+	handle @line_webhook_prefix {
+		respond "Not Found" 404
+	}
+
+	handle {
+		forward_auth 127.0.0.1:4180 {
+			uri /oauth2/auth
+			copy_headers Cf-Access-Authenticated-User-Email {http.reverse_proxy.X-Auth-Request-Email}
+		}
+		reverse_proxy 127.0.0.1:8086 {
+			header_up -X-Internal-Token
+		}
+	}
+}
+```
+
+兜底 `handle` 与 [§3 Option B](#option-b--caddy--an-authenticating-proxy-sso)
+完全一致 —— **普通 Todo API 的认证链没有被放宽**。上线前执行：
+
+```bash
+sudo cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%s)
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo systemctl reload caddy
+curl -I http://todo.example.com/        # 仍应 301/308 跳到 HTTPS
+```
+
+#### nginx
+
+⚠️ **继承陷阱**（本项目实测踩过）：某个 `location` 只要写了任意一条自己的
+`proxy_set_header`，server 级的全部条目都不会被继承 —— Token 剥离指令必须和
+身份头替换写在**同一个 location 块**里。同时把 Bypass 前缀下的子路径一并拒绝。
+
+```nginx
+location = /line/webhook {
+    client_max_body_size 64k;
+    limit_except POST { deny all; }
+    proxy_pass http://127.0.0.1:8087;
+    proxy_set_header Host $host;
+    proxy_set_header X-Line-Signature $http_x_line_signature;
+    proxy_set_header X-Internal-Token "";
+    proxy_set_header Cf-Access-Authenticated-User-Email "";
+    # 不要用 proxy_set_body / sub_filter / gzip 改写 body
+}
+location ^~ /line/webhook/ { deny all; }
+```
+
+#### 验证清单
+
+- [ ] 已备份原 Caddyfile 并**合并**（不是覆盖）路由；示例的 `auto_https off` 没被带进生产
+- [ ] `caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile` → Valid configuration
+- [ ] `curl -I http://todo.example.com/` → 仍跳 HTTPS（自动 HTTPS 未被关闭）
+- [ ] `curl -i -X POST https://todo.example.com/line/webhook -d '{}'` → **401**（缺签名被拒，说明路径通且 Access 放行正确）
+- [ ] `curl -i https://todo.example.com/line/webhook/anything` → **404**（Bypass 前缀没落进 Todo 应用）
+- [ ] LINE Developers → Webhook → **Verify** → Success
+- [ ] `curl -i https://todo.example.com/todo/api/tasks` → 仍被 Access 拦截 / 401
+- [ ] 请求体 >64 KiB → 413；非 `POST /line/webhook` 的方法/路径 → 404 / 需认证
+- [ ] 网页自助绑定一次 + 测试通知成功（完整步骤见 `README.md` 的 LINE 章节）
 
 ## 4. Machine-to-machine access (y8ysystems-style services)
 
@@ -473,7 +604,12 @@ a private data directory:
 sudo useradd --system --user-group --no-create-home \
         --shell /usr/sbin/nologin y8y-notify
 sudo usermod --append --groups y8y-notify y8y
-sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
+# 已有目录: sudo chmod 3770 /var/lib/y8y-todo/notify  (补 sticky 位, 见 §5.2.4)
+# ⚠️ 属主必须是 y8y-notify: sticky 不限制目录所有者 (见 §5.1 / C8)
+sudo chown y8y-notify:y8y-notify /var/lib/y8y-todo/notify
+# 启用 LINE 自助绑定时还要建 2750 的 line-link/ 与 2770 的 line-link-inbox/
+# (见 §5.1 与 docs/line-self-link.md §4), 并跑 --line-link-layout 前置审计
 # Apply the task ACLs and restart Web as described in §5.2.6 before proceeding.
 ```
 
@@ -630,6 +766,72 @@ the API key with `***`.
   The whole data directory is what you back up, so it is included
   (§7).
 
+#### LINE self-service linking (V1) — one extra unit, no extra privilege
+
+Self-service LINE binding adds a **third process**,
+`y8y-todo-line-webhook.service` (packaged template in `packaging/`). It runs
+as the **same** `y8y-notify` account as the scheduler, listens only on
+`127.0.0.1:8087`, and is reached exclusively through the single public
+path `/line/webhook` (see §3.5). It is the only component that reads
+`Y8Y_NOTIFY_LINE_CHANNEL_SECRET`; it reuses `notifications.LineProvider`
+for the test push, so there is no second LINE API client.
+
+```bash
+# ⚠️ 三级目录的**权限与属主**都是安全边界, 不是可选优化
+#    (详见 docs/line-self-link.md §4):
+sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
+sudo chmod 3770 /var/lib/y8y-todo/notify                    # 已有目录补 sticky
+sudo chown y8y-notify:y8y-notify /var/lib/y8y-todo/notify   # chmod 不改属主!
+sudo install -d -o y8y-notify -g y8y-notify -m 2750 \
+        /var/lib/y8y-todo/notify/line-link                  # 权威: Web 只读
+sudo install -d -o y8y-notify -g y8y-notify -m 2770 \
+        /var/lib/y8y-todo/notify/line-link-inbox            # 请求队列: 共享可写
+sudo usermod --append --groups y8y-notify y8y
+# 改组后按 §5.2.6 在维护窗口重启 Web 服务
+sudo cp /opt/y8y-todo/packaging/y8y-todo-line-webhook.service \
+        /etc/systemd/system/y8y-todo-line-webhook.service
+sudo systemctl daemon-reload
+
+# 启动之前跑一次 Operator 前置审计 (C8 会核验三级目录属主/权限/符号链接):
+sudo python3 /opt/y8y-todo/scripts/check-notify-isolation.py \
+        --unit-dir /etc/systemd/system \
+        --env-file /etc/y8y-todo/y8y-todo-notify.env \
+        --data-dir /var/lib/y8y-todo --line-link-layout   # 退出码必须 0
+sudo systemctl enable --now y8y-todo-line-webhook.service
+```
+
+The web unit is **unchanged**: it still reads only
+`/etc/y8y-todo/y8y-todo.env`, and that file only gains the *public*
+`Y8Y_LINE_BOT_ID` (a Bot Basic ID, not a credential). The Channel Secret
+and Channel Access Token stay in `y8y-todo-notify.env` (`root:root 600`).
+
+**Why the split (P0-2):** a single group-writable `2770` directory would let
+the Web process `unlink` / `os.replace` / create `binding-*.json` — i.e. forge
+a recipient without any verified LINE webhook. Creating, replacing or deleting
+a file needs write permission on the **parent directory**, so the authoritative
+records now live in `line-link/` (`2750`, Web has only `r-x`) while Web writes
+its requests to `line-link-inbox/` (`2770`). The **sticky** bit on `notify/`
+(`3770`) stops *non-owner* Web processes from renaming the notification-owned
+`line-link/` directory and putting a fake one in its place — but Linux sticky
+**does not restrict the directory owner**. Hence `notify/` itself **must be
+owned by `y8y-notify`**; a Web-owned parent with otherwise perfect
+`3770/2750/2770` modes still lets Web `rmdir` the authoritative directory and
+recreate it. `verify_trusted_layout()` checks parent ownership, sticky/other
+bits, symlinks and all three owners at startup and **fails closed**; the
+Operator precheck `check-notify-isolation.py --line-link-layout` (C8)
+independently audits the same layout before enabling the unit. A real
+cross-UID A/B exploit reproduction runs in CI via
+`sudo bash tests/linux_notify_acl.sh`.
+
+`Y8Y_NOTIFY_LINE_TARGETS` remains as a **fallback only for users who never
+self-bound and never unlinked**, so an upgrade never silently removes anyone's
+notifications. A pending `unlink-*` request stops delivery **immediately** —
+even while the webhook service is offline — and the persistent `unlinked-*`
+tombstone written after recovery **never falls back** to the old address
+(P0-1). When a binding and the old variable disagree, the conflict is
+published in the capability table (user ids only) and shown in the settings
+UI; set `Y8Y_NOTIFY_LINE_CONFLICT_POLICY=strict` to fail closed instead.
+
 ### 5.2 Credential isolation (process permissions)
 
 #### 5.2.1 The question
@@ -749,8 +951,25 @@ files live in `/var/lib/y8y-todo/notify`, owned by the scheduler, with
 the shared group and the setgid bit set:
 
 ```bash
-sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
+# 已有部署补 sticky + 属主 (chmod 不会改属主):
+sudo chmod 3770 /var/lib/y8y-todo/notify
+sudo chown y8y-notify:y8y-notify /var/lib/y8y-todo/notify
 ```
+
+The extra `1` (sticky bit) is required by LINE self-service linking (§5.1):
+it stops a *non-owner* web account from renaming/deleting the
+notification-owned `line-link/` directory that holds authoritative LINE
+bindings. It does not change the existing notification files: each service
+still replaces only the files it owns.
+
+⚠️ **Sticky does not restrict the directory owner.** If `notify/` is owned by
+`y8y` (Web) instead of `y8y-notify`, Web can still `rmdir` / rename `line-link/`
+and recreate a fake one — even with all three modes exactly `3770/2750/2770`.
+Ownership is therefore a hard requirement, checked both at Webhook startup
+(`verify_trusted_layout()`) and by the Operator precheck
+`check-notify-isolation.py --line-link-layout` (C8). CI reproduces this with
+two real UIDs in `tests/linux_notify_acl.sh`.
 
 | file | written by | read by | how |
 | --- | --- | --- | --- |
@@ -769,16 +988,25 @@ without the lock — recreate it with
 
 Why each piece is there:
 
-- **group `y8y-notify` (2770)** — both accounts are members, so both
-  may create and rename files in the directory. "Other" has no access
-  to this directory. Web retains access to its data outside it.
+- **group `y8y-notify` (3770)** — both accounts are members, so both
+  may create files in the directory. "Other" has no access. Web retains
+  access to its data outside it.
 - **setgid (the `2`)** — every file created in the directory inherits
   the group, so the file one account writes stays readable by the
   other even after `os.replace()` swaps in a fresh inode. Without it
   the group would revert to the writer's primary group on every write.
+- **sticky (the `1`)** — a group member *who does not own the directory*
+  may delete/rename only files it **owns**. Together with the
+  `y8y-notify` ownership of `notify/` this protects the notification-owned
+  `line-link/` authoritative binding directory (§5.1) from being swapped
+  out by the web account. It also means each service replaces only its own
+  files:
+  Web owns `notification_settings.json`, the scheduler owns
+  `notification_state.json` / `notification_channels.json` /
+  `notification.lock`. Do not create one of these as root and leave it
+  root-owned, or its real owner can no longer replace it.
 - **umask 0022** (both units) — files land as `0644`, i.e. readable by
-  the other account. Either group member can replace or delete any file
-  through the writable directory, regardless of the file mode.
+  the other account.
 - **`ReadWritePaths=-/var/lib/y8y-todo/notify`** in the notify unit —
   a systemd-level allowlist on top of the Unix permissions. The data
   directory root is read-only for the scheduler, so even a compromised
@@ -904,7 +1132,12 @@ follow symlinks. Resolve any symlinks in the two task trees before proceeding.
 sudo useradd --system --user-group --no-create-home \
         --shell /usr/sbin/nologin y8y-notify
 sudo usermod --append --groups y8y-notify y8y
-sudo install -d -o y8y-notify -g y8y-notify -m 2770 /var/lib/y8y-todo/notify
+sudo install -d -o y8y-notify -g y8y-notify -m 3770 /var/lib/y8y-todo/notify
+# 已有部署: sudo chmod 3770 /var/lib/y8y-todo/notify  (补 sticky 位)
+# ⚠️ 属主必须是 y8y-notify —— sticky 不限制目录所有者, 见 §5.1 / C8:
+sudo chown y8y-notify:y8y-notify /var/lib/y8y-todo/notify
+# LINE 自助绑定 (可选): 2750 line-link/ + 2770 line-link-inbox/, 见 §5.1
+#   启用时先跑 check-notify-isolation.py --line-link-layout (退出码须为 0)
 # Create the two task roots as Web if absent, preserving existing directories.
 sudo -u y8y mkdir -p /var/lib/y8y-todo/todo /var/lib/y8y-todo/recurring
 # Only traversal at the private root: no listing or writing.
@@ -986,6 +1219,7 @@ sudo python3 scripts/check-notify-isolation.py \
 | C5 | both task trees and Markdown files are accessible, state directory writable, root not writable and internal token inaccessible |
 | C6 | the web user can read the capability table and write the preferences |
 | C7 | the notify unit's writable paths do **not** cover the whole data directory |
+| C8 | LINE binding layout: `notify/` is owned by the **notify** account (Linux sticky does not restrict the directory owner), plus mode bits, all three owners and symlinks. Auto-enabled when the Webhook unit is installed; force with `--line-link-layout` |
 
 Exit codes: `0` = all checks passed, `1` = a check failed, `2` = a
 check could not be verified (for example C4 needs root and Linux `/proc`). **`2` is not a pass.** Checks that cannot be decided are
@@ -997,7 +1231,11 @@ permission probe cannot be decided (dropping privileges failed, the
 helper process did not start), the result is `UNKNOWN` — never "OK".
 
 `--repo-packaging` makes the script audit the unit templates in
-`packaging/` instead of the installed ones — useful for CI.
+`packaging/` instead of the installed ones — useful for CI. It is a
+*template* self-check, so C8 (a host-data-directory check) is skipped there
+unless you also pass `--line-link-layout`. Deploying the Webhook service on a
+real host requires the combined precheck in §5.1 to return `0` before enabling
+the unit.
 
 ## 6. Upgrading from versions with Google Calendar
 

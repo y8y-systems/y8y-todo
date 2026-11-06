@@ -1,0 +1,63 @@
+# y8y Todo —— LINE Webhook 独立公开入口 (Caddy 2) —— **参考片段, 不是可覆盖的配置**
+#
+# ⚠️ 禁止整体复制覆盖生产配置:
+#   ❌ cp packaging/Caddyfile.line-webhook.example /etc/caddy/Caddyfile
+#   本文件只有一个占位站点 (todo.example.com) 与 3 个路由片段, 用来做
+#   离线语法验证与评审。生产上必须把它们**合并进现有的站点块**, 保留原有
+#   全局选项、TLS/证书配置、其它站点和其它路由:
+#     sudo cp -a /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%s)
+#     # 手工合并下面的 3 个 matcher / handle, 不要整文件覆盖
+#     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+#     sudo systemctl reload caddy
+#
+# ⚠️ 本文件**不含任何全局选项**, 尤其没有 `auto_https off`:
+#   该选项只适用于离线测试 (占位域名领不到真实证书)。生产配置里若带上它,
+#   会关掉 Caddy 的自动 HTTPS 及 HTTP→HTTPS 重定向, 站点可能降级为明文
+#   HTTP。切勿把测试环境的全局选项一起复制到生产。
+#   离线自检: caddy validate --config packaging/Caddyfile.line-webhook.example
+#             --adapter caddyfile
+#
+# 三条硬规则:
+#   1. 只有「精确路径 /line/webhook + POST」转发到常驻 Webhook 服务 (8087)。
+#      header_up 必须写在 reverse_proxy **块内** —— 它是 reverse_proxy 的
+#      子指令, 写在 handle 里 Caddy 会直接报语法错误。
+#   2. /line/webhook 的其它方法 / 子路径一律在 Caddy 层 404。Cloudflare
+#      Access 的 Bypass 应用是「路径根」(会连带覆盖子路径), 所以绝不能让
+#      这些请求掉进下面的 Todo 应用 handle。
+#   3. 其余所有路径仍走原来的 forward_auth 认证链, 一个字都不要放宽;
+#      公开入口继续剥离客户端自带的 X-Internal-Token。
+#
+# 与 docs/deployment.md §3 Option B 的认证链保持一致 (oauth2-proxy 例子);
+# 用 Cloudflare Access / Authelia 时替换成对应的 forward_auth 提供端即可。
+
+todo.example.com {
+	@line_webhook_post {
+		path /line/webhook
+		method POST
+	}
+	handle @line_webhook_post {
+		reverse_proxy 127.0.0.1:8087 {
+			# X-Line-Signature 默认原样透传; body 也必须是原始字节。
+			# 客户端伪造的身份头 / 机器 Token 一律剥掉。
+			header_up -X-Internal-Token
+			header_up -Cf-Access-Authenticated-User-Email
+		}
+	}
+
+	# Bypass 前缀下的其它请求: 直接拒绝, 不给 Todo API 任何机会。
+	@line_webhook_prefix path /line/webhook /line/webhook/*
+	handle @line_webhook_prefix {
+		respond "Not Found" 404
+	}
+
+	handle {
+		# 原来的认证配置, 保持不变。
+		forward_auth 127.0.0.1:4180 {
+			uri /oauth2/auth
+			copy_headers Cf-Access-Authenticated-User-Email {http.reverse_proxy.X-Auth-Request-Email}
+		}
+		reverse_proxy 127.0.0.1:8086 {
+			header_up -X-Internal-Token
+		}
+	}
+}

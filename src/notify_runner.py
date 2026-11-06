@@ -190,7 +190,8 @@ if __name__ == '__main__':
         # 调度器永远不该让 systemd 看到崩溃循环 —— 记录后干净退出。
         # 兜底脱敏: 顶层异常理论上也可能带出凭据 (例如 URL 解析失败)。
         secrets = [os.environ.get('Y8Y_NOTIFY_LINE_TOKEN', ''),
-                   os.environ.get('Y8Y_NOTIFY_EMAIL_API_KEY', '')]
+                   os.environ.get('Y8Y_NOTIFY_EMAIL_API_KEY', ''),
+                   os.environ.get('Y8Y_NOTIFY_LINE_CHANNEL_SECRET', '')]
         print(f'[notify] fatal error: {redact_secrets(str(exc), secrets)}',
               file=sys.stderr)
         sys.exit(1)

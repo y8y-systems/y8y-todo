@@ -13,6 +13,10 @@
   C5  调度器对数据目录: 必须能读任务目录与用户偏好, 且**能写状态目录**
   C6  Web 对状态目录:   必须能读能力表、写用户偏好
   C7  通知单元的可写范围: 不得覆盖整个数据目录 (那里有机器凭据)
+  C8  LINE 绑定三级目录: notify/ 必须归**通知侧账号**所有 (sticky 不限制
+                       目录所有者), 三级目录权限位/属主/符号链接都要合格。
+                       检测到 Webhook 单元文件时自动启用, 也可用
+                       --line-link-layout 强制检查。
 
 不改持久状态: 启动只含虚构环境的短暂探针; 不建用户、不改权限、不启停单元、不读真实凭据。
 
@@ -29,6 +33,7 @@
     --env-file PATH   通知凭据文件 (默认 /etc/y8y-todo/y8y-todo-notify.env)
     --data-dir PATH   数据目录 (默认 /var/lib/y8y-todo)
     --state-dir PATH  通知状态目录 (默认 <data-dir>/notify)
+    --line-link-layout 强制检查 LINE 绑定三级目录 (部署 Webhook 服务时用)
 
 退出码:
     0  全部必需项通过
@@ -40,12 +45,14 @@ import grp
 import os
 import pwd
 import select
+import stat
 import subprocess
 import sys
 from pathlib import Path
 
 WEB_UNIT = 'y8y-todo.service'
 NOTIFY_UNIT = 'y8y-todo-notify.service'
+LINE_WEBHOOK_UNIT = 'y8y-todo-line-webhook.service'
 
 #: 凭据文件在 Web 单元里出现即视为失败
 NOTIFY_ENV_NAME = 'y8y-todo-notify.env'
@@ -218,6 +225,62 @@ def _access_as(uid, gid, groups, path, mode):
     return None                             # 异常退出 → 判不了
 
 
+def _line_link_layout_problems(state_dir, notify_uid, web_uid=None):
+    """LINE 绑定三级目录的属主 / 权限 / 符号链接问题 (空列表 = 合格)。
+
+    独立于 ``src/line_link.py`` 的 ``verify_trusted_layout()`` 再查一遍,
+    便于 Operator 在**启动服务之前**用 root 审计, 而不是等它 fail closed。
+
+    关键: Linux sticky 位不限制「目录所有者」删除别人的目录项。若
+    ``notify/`` 归 Web 用户所有, 即使 sticky + 2750 齐全, Web 也能把
+    ``line-link/`` 挪走/删掉再伪冒一个 —— 所以属主必须验收。
+    """
+    problems = []
+    layout = (
+        ('notify', Path(state_dir)),
+        ('trusted', Path(state_dir) / 'line-link'),
+        ('inbox', Path(state_dir) / 'line-link-inbox'),
+    )
+    for label, path in layout:
+        try:
+            info = path.lstat()                  # lstat: 不跟随符号链接
+        except OSError as exc:
+            problems.append(f'{label} 目录不存在或不可读 ({exc.strerror})')
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            problems.append(f'{label} 是符号链接 (拒绝)')
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            problems.append(f'{label} 不是目录')
+            continue
+        if info.st_uid != notify_uid:
+            extra = ''
+            if web_uid is not None and info.st_uid == web_uid:
+                extra = ' —— 归 Web 用户所有, sticky 挡不住目录所有者!'
+            problems.append(
+                f'{label} 属主 uid={info.st_uid}, 应为通知侧 uid={notify_uid}{extra}')
+            continue
+        mode = stat.S_IMODE(info.st_mode)
+        if label == 'notify':
+            if not mode & stat.S_ISVTX:
+                problems.append('notify/ 缺 sticky 位 (应为 3770)')
+            if mode & 0o007:
+                problems.append(f'notify/ 权限 {mode:04o}: other 有访问权')
+            if (mode & 0o050) != 0o050:
+                problems.append(f'notify/ 权限 {mode:04o}: 共享组缺 r-x')
+        elif label == 'trusted':
+            if mode & 0o022:
+                problems.append(f'line-link/ 权限 {mode:04o}: group/other 可写')
+            if (mode & 0o050) != 0o050:
+                problems.append(f'line-link/ 权限 {mode:04o}: 共享组缺 r-x')
+        else:
+            if (mode & 0o070) != 0o070:
+                problems.append(f'line-link-inbox/ 权限 {mode:04o}: 共享组不可写')
+            if mode & 0o002:
+                problems.append(f'line-link-inbox/ 权限 {mode:04o}: other 可写')
+    return problems
+
+
 def _path_covers(candidate, target):
     """candidate 这个可写路径是否覆盖了 target (同一路径或它的父目录)。"""
     try:
@@ -241,6 +304,8 @@ def main(argv=None):
     parser.add_argument('--data-dir', default='/var/lib/y8y-todo')
     parser.add_argument('--state-dir', default='',
                         help='通知状态目录 (默认 <data-dir>/notify)')
+    parser.add_argument('--line-link-layout', action='store_true',
+                        help='强制检查 LINE 绑定三级目录 (检测到 webhook 单元时自动启用)')
     args = parser.parse_args(argv)
     _results.clear()
 
@@ -476,6 +541,28 @@ def main(argv=None):
         else:
             _record(OK, 'C7 通知单元的可写范围',
                     f'可写路径 {", ".join(rw_paths)} 不覆盖数据目录 {data_dir}')
+
+    # ── C8 LINE 绑定三级目录 (P0-2) ───────────────────────────────────
+    # 只在「装了 webhook 单元」或显式 --line-link-layout 时检查: 老部署
+    # 没启用自助绑定时不该因为缺少 line-link/ 就被判失败。
+    if args.line_link_layout or (not args.repo_packaging
+                                and (unit_dir / LINE_WEBHOOK_UNIT).is_file()):
+        try:
+            notify_uid = pwd.getpwnam(notify_user).pw_uid if notify_user else None
+            web_uid = pwd.getpwnam(web_user).pw_uid if web_user else None
+        except KeyError:
+            notify_uid, web_uid = None, None
+        if notify_uid is None:
+            _record(UNKNOWN, 'C8 LINE 绑定目录属主/权限',
+                    f'读不到通知侧账号 {notify_user!r} 的 uid')
+        else:
+            problems = _line_link_layout_problems(state_dir, notify_uid, web_uid)
+            if problems:
+                _record(FAIL, 'C8 LINE 绑定目录属主/权限', '; '.join(problems))
+            else:
+                _record(OK, 'C8 LINE 绑定目录属主/权限',
+                        f'notify/ 归通知侧 uid={notify_uid}, 三级目录权限与属主合格 '
+                        '(sticky 对目录所有者无效, 故必须验属主)')
 
     failed = [r for r in _results if r[0] == FAIL]
     unknown = [r for r in _results if r[0] == UNKNOWN]
