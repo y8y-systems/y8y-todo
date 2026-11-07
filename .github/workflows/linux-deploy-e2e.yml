@@ -78,6 +78,11 @@ jobs:
             echo "runner interpreter is $ACTUAL but the matrix wants ${{ matrix.python-version }}"
             exit 1
           fi
+          # setup-python exports LD_LIBRARY_PATH only for the runner. Register
+          # this job's library directory inside its disposable VM for sudo users.
+          dirname "$(dirname "$PYBIN")" | sed 's|$|/lib|' \
+            | sudo tee /etc/ld.so.conf.d/ci-job-python.conf >/dev/null
+          sudo ldconfig
           sudo -u "$Y8Y_USER" "$PYBIN" --version >/dev/null || {
             echo "the service user cannot execute $PYBIN"; exit 1; }
           echo "PYBIN=$PYBIN" >> "$GITHUB_ENV"
@@ -164,7 +169,7 @@ jobs:
 
       - name: E2E API — full phase (auth, tasks, lists, contract, disk)
         run: |
-          python3 scripts/e2e-api.py full \
+          sudo -u "$Y8Y_USER" "$PYBIN" /opt/y8y-todo/scripts/e2e-api.py full \
             "http://127.0.0.1:$PROD_PORT" e2e@example.com ci-e2e-token-abc123 \
             /tmp/e2e-state.json "$Y8Y_HOME/y8y-data"
 
@@ -202,7 +207,7 @@ jobs:
           [ "$SRV_USER" = "$Y8Y_USER" ] || { echo "not running as $Y8Y_USER"; exit 1; }
           [ "$(realpath "$SRV_EXE")" = "$(realpath "$PYBIN")" ] || {
             echo "restarted service is not on the matrix interpreter"; exit 1; }
-          python3 scripts/e2e-api.py persist \
+          sudo -u "$Y8Y_USER" "$PYBIN" /opt/y8y-todo/scripts/e2e-api.py persist \
             "http://127.0.0.1:$PROD_PORT" e2e@example.com ci-e2e-token-abc123 \
             /tmp/e2e-state.json "$Y8Y_HOME/y8y-data"
 
@@ -382,6 +387,10 @@ jobs:
           # 'sudo -u e2euser python3' 会静默落到系统 python。
           PYBIN="$(command -v python3)"
           echo "job python: $PYBIN → $(python3 --version 2>&1)"
+          dirname "$(dirname "$PYBIN")" | sed 's|$|/lib|' \
+            | sudo tee /etc/ld.so.conf.d/ci-job-python.conf >/dev/null
+          sudo ldconfig
+          sudo -u "$Y8Y_USER" "$PYBIN" --version
           echo "what 'sudo -u $Y8Y_USER python3' would resolve to:"
           sudo -u "$Y8Y_USER" bash -c 'command -v python3; python3 --version' || true
           echo "PYBIN=$PYBIN" >> "$GITHUB_ENV"
