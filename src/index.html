@@ -1923,6 +1923,7 @@ body.modal-locked {
           <div class="line-link-actions">
             <button class="btn btn-primary y8y-btn y8y-btn-primary y8y-btn-sm" id="lineLinkCopyBtn" type="button">复制绑定码</button>
             <a class="btn y8y-btn y8y-btn-ghost y8y-btn-sm" id="lineLinkOpenBtn" href="#" target="_blank" rel="noopener noreferrer" hidden>打开 LINE</a>
+            <button class="btn btn-primary y8y-btn y8y-btn-primary y8y-btn-sm" id="lineLinkRegenerateBtn" type="button" hidden>重新生成绑定码</button>
             <button class="btn y8y-btn y8y-btn-ghost y8y-btn-sm" id="lineLinkCancelBtn" type="button">取消</button>
           </div>
           <div class="settings-hint" id="lineLinkProgress" role="status" aria-live="polite">等待 LINE 消息…</div>
@@ -4200,10 +4201,13 @@ function renderLineLink() {
   const pendingEl = document.getElementById('lineLinkPending');
   const boundEl = document.getElementById('lineLinkBound');
   const unboundEl = document.getElementById('lineLinkUnboundActions');
+  const regenBtn = document.getElementById('lineLinkRegenerateBtn');
+  const cancelBtn = document.getElementById('lineLinkCancelBtn');
   const hintEl = document.getElementById('lineLinkHint');
   if (!s) { stateEl.textContent = 'LINE 绑定状态不可用'; return; }
   stateEl.className = 'line-link-state';
   pendingEl.hidden = true; boundEl.hidden = true; unboundEl.hidden = true;
+  regenBtn.hidden = true; cancelBtn.hidden = false;
   hintEl.textContent = s.hint || '';
 
   if (s.state === 'bound') {
@@ -4222,8 +4226,17 @@ function renderLineLink() {
     const openBtn = document.getElementById('lineLinkOpenBtn');
     if (s.deep_link) { openBtn.href = s.deep_link; openBtn.hidden = false; }
     else { openBtn.hidden = true; openBtn.href = '#'; }
+    if (s.state === 'expired') {
+      // 过期码的服务端文件按 mtime 24h 后才 GC, 状态会一直停在 expired。
+      // 「取消」只清浏览器缓存, 不清服务端 —— 必须给一个真正重新生成码的入口。
+      // startLineLink(false) 会 POST 新码; 新码未过期, status() 优先返回 pending。
+      regenBtn.hidden = false;
+      regenBtn.disabled = !s.available;
+      cancelBtn.hidden = true;
+    }
     document.getElementById('lineLinkProgress').textContent = s.state === 'expired'
-      ? '已过期，请重新生成。' : '请在 LINE 里向官方 Bot 发送上面的绑定码；本页会自动更新。';
+      ? '已过期，点「重新生成绑定码」取一个新码再发送。'
+      : '请在 LINE 里向官方 Bot 发送上面的绑定码；本页会自动更新。';
     return;
   }
   if (s.state === 'unlinking') {
@@ -4355,6 +4368,11 @@ async function sendLineTest() {
 }
 
 document.getElementById('lineLinkStartBtn').addEventListener('click', () => startLineLink(false));
+document.getElementById('lineLinkRegenerateBtn').addEventListener('click', () => {
+  const b = document.getElementById('lineLinkRegenerateBtn');
+  b.disabled = true;   // 防连点生成多个待用码
+  startLineLink(false).finally(() => { b.disabled = false; });
+});
 document.getElementById('lineLinkRebindBtn').addEventListener('click', () => startLineLink(true));
 document.getElementById('lineLinkUnlinkBtn').addEventListener('click', unlinkLine);
 document.getElementById('lineLinkTestBtn').addEventListener('click', sendLineTest);
