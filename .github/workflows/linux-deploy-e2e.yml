@@ -155,9 +155,10 @@ jobs:
             -H 'Cf-Access-Authenticated-User-Email: e2e@example.com' \
             -d '{"title":"默认目录验证","due":"2026-10-20"}' -o /dev/null -w 'create → %{http_code}\n'
           sudo -u "$Y8Y_USER" bash -c 'kill $(cat /tmp/y8y-default.pid)' || true
-          test -d "$Y8Y_HOME/.local/share/y8y-todo/todo" \
+          # Inspect the private home as its owner; keep directory permissions intact.
+          sudo -u "$Y8Y_USER" test -d "$Y8Y_HOME/.local/share/y8y-todo/todo" \
             || { echo "default data dir missing"; cat /tmp/y8y-default.log; exit 1; }
-          test -n "$(ls -A "$Y8Y_HOME/.local/share/y8y-todo/todo" 2>/dev/null)" \
+          test -n "$(sudo -u "$Y8Y_USER" ls -A "$Y8Y_HOME/.local/share/y8y-todo/todo")" \
             || { echo "no task file under the default data dir"; exit 1; }
           echo "OK: default data dir = $Y8Y_HOME/.local/share/y8y-todo (task written there)"
 
