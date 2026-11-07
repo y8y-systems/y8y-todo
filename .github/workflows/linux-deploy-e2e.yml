@@ -27,7 +27,7 @@ concurrency:
 jobs:
   linux-e2e:
     name: Linux fresh-install E2E (Ubuntu 24.04, Python ${{ matrix.python-version }})
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-24.04]
     strategy:
       fail-fast: false
       matrix:
@@ -213,7 +213,7 @@ jobs:
 
   systemd-e2e:
     name: Linux systemd E2E (Ubuntu 24.04, packaged unit, real systemd)
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-24.04]
     env:
       Y8Y_USER: y8y
       Y8Y_HOME: /var/lib/y8y-todo
@@ -355,7 +355,7 @@ jobs:
 
   browser-e2e:
     name: Linux browser E2E (Ubuntu 24.04, real UI)
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-24.04]
     env:
       Y8Y_USER: e2euser
       Y8Y_HOME: /home/e2euser
@@ -461,7 +461,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   gate-e2e:
     name: gate / e2e
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-24.04]
     needs: [linux-e2e, systemd-e2e, browser-e2e]
     if: always()
     steps:
