@@ -320,7 +320,8 @@ def test_runner_test_output_never_contains_credentials(monkeypatch, tmp_path, ca
     out = capsys.readouterr().out
     assert rc == 1
     assert FAKE_LINE_TOKEN not in out
-    assert '***' in out
+    assert 'provider_failed' in out
+    assert 'upstream rejected' not in out
 
 
 def test_runner_json_output_never_contains_credentials(monkeypatch, tmp_path, capsys):

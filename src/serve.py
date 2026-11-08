@@ -1844,8 +1844,23 @@ class TodolistHandler(http.server.BaseHTTPRequestHandler):
         self._send_error('Not found', 404)
 
     def log_message(self, format, *args):
-        if '/todo/api/' in args[0]:
-            super().log_message(format, *args)
+        # Task IDs contain title-derived filenames. Log only fixed API routes;
+        # never echo the request line, query, filename, address or error text.
+        path = getattr(self, 'path', '').split('?', 1)[0].split('#', 1)[0].rstrip('/')
+        if not path.startswith('/todo/api/'):
+            return
+        endpoint = path[len('/todo/api/'):].split('/', 1)[0]
+        if endpoint not in ('tasks', 'lists', 'shopping', 'persistent-projects',
+                            'notification-settings', 'line-link', 'line-test', 'google-calendar'):
+            endpoint = 'other'
+        route = '/todo/api/' + endpoint
+        if endpoint != 'other' and path != route:
+            route += '/:resource'
+        method = self.command if self.command in ('GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'OPTIONS') else 'OTHER'
+        status = str(args[1]) if format == '"%s" %s %s' and len(args) == 3 else '-'
+        if not (status.isascii() and status.isdigit() and len(status) == 3):
+            status = '-'
+        print(f'[http] {method} {route} status={status}', file=sys.stderr)
 
 
 def _cleanup_stale_tmp_files():
