@@ -22,7 +22,7 @@ concurrency:
 jobs:
   test:
     name: pytest (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-24.04]
     # 显式 bash(避免 windows runner default shell 差异)
     # 2026-10-17 明确要求
     defaults:
@@ -127,7 +127,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   public-tree:
     name: public tree privacy gate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-24.04]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.12
@@ -160,7 +160,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   gate-pytest:
     name: gate / pytest
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-24.04]
     needs: [test, public-tree]
     if: always()
     steps:

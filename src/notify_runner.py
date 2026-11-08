@@ -55,6 +55,24 @@ def safe_text(config, text, limit=200):
     return redact_secrets(text, values)[:limit]
 
 
+def log_result(item, status):
+    """CLI output contains delivery status, never task/recipient/error text."""
+    result = {key: item[key] for key in ('channel', 'kind', 'status') if key in item}
+    result.setdefault('status', status)
+    if item.get('error'):
+        result['error'] = 'provider_failed'
+    return result
+
+
+def log_report(report):
+    result = {key: report[key] for key in
+              ('now', 'dry_run', 'scope', 'window_minutes', 'missed_reminders')
+              if key in report}
+    for status in ('planned', 'sent', 'failed', 'skipped'):
+        result[status] = [log_result(item, status) for item in report.get(status, [])]
+    return result
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         prog='notify_runner',
@@ -78,7 +96,7 @@ def resolve_now(raw, tz):
     try:
         parsed = datetime.fromisoformat(raw)
     except ValueError:
-        raise SystemExit(f'invalid --now value: {raw!r} (expected ISO 8601)')
+        raise SystemExit('invalid --now value (expected ISO 8601)')
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=tz)
     return parsed
@@ -120,9 +138,9 @@ def main(argv=None):
     now = resolve_now(args.now, tz)
 
     if args.test:
-        results = send_test(config, args.test)
+        results = [log_result(item, item['status']) for item in send_test(config, args.test)]
         if args.json:
-            print(json.dumps({'test': args.test, 'results': results}, ensure_ascii=False))
+            print(json.dumps({'results': results}, ensure_ascii=False))
         else:
             for item in results:
                 print(f'  {item["channel"]}: {item["status"]}'
@@ -141,7 +159,7 @@ def main(argv=None):
     except OSError as exc:
         # 状态目录写不了 —— 能力表发不出去, Web 端看不到渠道。
         # 这不是"凭据错了", 是部署没配好: 明确说出来, 别让运维去猜。
-        print(f'[notify] {NotificationStateError(state_dir, exc.strerror or str(exc))}',
+        print(f'[notify] capability_publish_failed errno={exc.errno}',
               file=sys.stderr)
         return 1
 
@@ -149,9 +167,10 @@ def main(argv=None):
         report = scheduler.run(dry_run=args.dry_run)
     except NotificationStateError as exc:
         # fail closed: 记不下投递状态就不发 —— 否则每次 tick 都会重发。
-        print(f'[notify] {exc}', file=sys.stderr)
+        print(f'[notify] state_unavailable type={type(exc).__name__}', file=sys.stderr)
         return 1
 
+    report = log_report(report)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
@@ -161,21 +180,18 @@ def main(argv=None):
         # journal 里 grep 一下就能确认加固在生效。
         dumpable = procguard.dumpable()
         print(f'[notify] {mode} at {report["now"]} '
-              f'{config.notification_summary()} '
-              f'data_dir={config.data_dir} '
+              f'notify={"on" if config.notify_enabled else "off"} scope={config.task_scope} '
               f'dumpable={"unknown" if dumpable is None else dumpable}')
         for item in report.get('planned', []):
-            print(f'  [plan] user={item["user"]} channel={item["channel"]} '
-                  f'kind={item["kind"]} {item.get("task", "")}')
+            print(f'  [plan] channel={item["channel"]} kind={item["kind"]}')
         for item in report.get('sent', []):
-            print(f'  [sent] user={item["user"]} channel={item["channel"]} '
-                  f'kind={item.get("kind", "reminder")} {item.get("task", "")}')
+            print(f'  [sent] channel={item["channel"]} kind={item.get("kind", "reminder")}')
         for item in report.get('failed', []):
-            print(f'  [fail] user={item["user"]} channel={item["channel"]} '
+            print(f'  [fail] channel={item["channel"]} '
                   f'kind={item.get("kind", "reminder")} status={item.get("status")} '
                   f'error={item.get("error", "")}')
-        for item in report.get('skipped', []):
-            print(f'  [skip] {item.get("user", "-")} {item.get("reason", "")}')
+        if report.get('skipped'):
+            print(f'  [skip] count={len(report["skipped"])}')
         # 错过的单点提醒只报个数 —— 逐条列会让 journal 被刷屏。
         missed = report.get('missed_reminders', 0)
         if missed:
@@ -188,10 +204,7 @@ if __name__ == '__main__':
         sys.exit(main())
     except Exception as exc:                                   # noqa: BLE001
         # 调度器永远不该让 systemd 看到崩溃循环 —— 记录后干净退出。
-        # 兜底脱敏: 顶层异常理论上也可能带出凭据 (例如 URL 解析失败)。
-        secrets = [os.environ.get('Y8Y_NOTIFY_LINE_TOKEN', ''),
-                   os.environ.get('Y8Y_NOTIFY_EMAIL_API_KEY', ''),
-                   os.environ.get('Y8Y_NOTIFY_LINE_CHANNEL_SECRET', '')]
-        print(f'[notify] fatal error: {redact_secrets(str(exc), secrets)}',
+        # 只记异常类型，原始正文可能包含任务、收件人或本机路径。
+        print(f'[notify] fatal error: {type(exc).__name__}',
               file=sys.stderr)
         sys.exit(1)

@@ -29,7 +29,7 @@ concurrency:
 jobs:
   upgrade-rehearsal:
     name: P4 升级/回滚隔离演练 (Ubuntu 24.04, 旧版基线 vs 新版)
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-24.04]
     # shell: bash → bash --noprofile --norc -eo pipefail {0}
     # 必须 pipefail: 各步骤用 'python3 ... | tee -a /tmp/rehearsal.log' 留痕,
     # 默认 shell (bash -e, 无 pipefail) 会用 tee 的退出码掩盖脚本失败 —
@@ -315,7 +315,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   gate-upgrade:
     name: gate / upgrade
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-24.04]
     needs: [upgrade-rehearsal]
     if: always()
     steps:

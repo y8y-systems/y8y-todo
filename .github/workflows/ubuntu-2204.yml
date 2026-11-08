@@ -29,7 +29,7 @@ concurrency:
 jobs:
   pytest-310:
     name: pytest (Ubuntu 22.04, system Python 3.10)
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-22.04]
     defaults:
       run:
         shell: bash
@@ -70,7 +70,7 @@ jobs:
 
   systemd-249:
     name: Linux systemd E2E (Ubuntu 22.04, systemd 249, packaged unit, non-root)
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-22.04]
     env:
       Y8Y_USER: y8y
       Y8Y_HOME: /var/lib/y8y-todo
@@ -244,7 +244,7 @@ jobs:
 
   standalone-python:
     name: Ubuntu 22.04 + standalone Python 3.12 (uv runtime, non-root)
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-22.04]
     env:
       Y8Y_USER: y8y
       Y8Y_HOME: /var/lib/y8y-todo
@@ -359,7 +359,7 @@ jobs:
 
   browser-2204:
     name: Linux browser E2E (Ubuntu 22.04, real Chromium)
-    runs-on: ubuntu-22.04
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-22.04]
     env:
       Y8Y_USER: e2euser
       Y8Y_HOME: /home/e2euser
@@ -445,7 +445,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   gate-ubuntu:
     name: gate / ubuntu
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, y8y-linux-ci, y8y-ubuntu-24.04]
     needs: [pytest-310, systemd-249, standalone-python, browser-2204]
     if: always()
     steps:

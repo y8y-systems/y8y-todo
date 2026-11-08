@@ -238,6 +238,12 @@ the digest time.
 
 ### Privacy
 
+- Notification runner text/`--json` output contains channel, kind and delivery
+  status, without task titles, recipient identities, data paths or raw provider
+  errors. CLI JSON omits the former `user`/`task`/`test` identity fields; local
+  delivery state and notification contents keep their existing format.
+- Web access logs contain only method, fixed API route and status. Resource IDs
+  (which can contain task titles), query strings and client addresses are omitted.
 - The web process **never** holds a LINE token or an email API key. The
   scheduler publishes a credential-free *capability table*
   (`notification_channels.json`) that says which user may use which
