@@ -49,7 +49,7 @@ GitHub Actions（定时 / 手动）
         │  · 写入前后校验 @media 头数量（历史事故：误删后手机端不可用）
         │  · 任一步失败 → 回滚到写入前字节，不留半写入文件
         ▼
-自动验证 → 建 PR（Bot 身份）→ 人工审批合并
+自动验证 → 建 PR（Bot 身份）→ GitHub 门禁通过 → 合并
 ```
 
 不依赖 Hermes、不依赖 LLM、不依赖任何个人 Agent Session，也不需要每年启动一次开发任务。
@@ -161,7 +161,7 @@ GitHub App Bot 身份：
 
 配置后，`propose` job 用 `actions/create-github-app-token` 铸一个仅含
 `contents: write` + `pull-requests: write`、且限定本仓库的安装令牌，再建 PR。
-Bot 身份建 PR 才能让 4 个 `gate / *` Required Checks 正常触发；PR 仍需人工审批合并。
+Bot 身份建 PR 才能让 4 个 `gate / *` Required Checks 正常触发；PR 仍需满足 GitHub 的独立审核。
 
 **当前这两个凭据尚未配置**：定时检查、解析、校验、生成补丁都能自动完成，
 但自动建 PR 会被明确报为阻塞（job 失败 + `$GITHUB_STEP_SUMMARY` 说明 + 补丁 artifact），
@@ -173,7 +173,7 @@ Bot 身份建 PR 才能让 4 个 `gate / *` Required Checks 正常触发；PR �
    需要时可用 `workflow_dispatch` 的 `notice_url` 做来源交叉核对。
 2. 农历节日对应的「节日本身」日期：未来年份若尚未录入 `festivals`，解析器会要求人工补录，
    不会自行推算。
-3. PR 的人工审批与合并；合并后如需上生产，走部署流程并单独授权。
+3. PR 的独立审核与合并按 [发布流程](release-process.md) 执行。合并后如需上生产，走部署流程并单独授权。
 4. 首次有效检查后，确认新旧两套更新机制不会同时写同一数据源，再关闭旧任务。
 
 ## 8. 失败与恢复

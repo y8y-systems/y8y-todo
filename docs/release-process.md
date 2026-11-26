@@ -8,7 +8,7 @@
 ## 0. 一句话
 
 ```
-分支 → PR → CI 全绿 → 人工批准 → merge 到 main
+分支 → PR → CI 全绿 → 独立审核通过 → merge 到 main
                                       │
                                       ▼
                  运维方在私有运维系统里按 commit SHA 部署
@@ -23,7 +23,7 @@
 | 门 | 谁管 | 通过标准 | 过了之后 |
 |---|---|---|---|
 | ① CI 全绿 | GitHub Actions | 所有 workflow `success` | PR 可以被审 |
-| ② 人工批准 merge | 仓库 owner | owner 明确同意 | `main` 前进 |
+| ② PR 合并 | 有权限的合并者（含受授权 Agent） | 满足 GitHub 要求的独立审核与状态检查 | `main` 前进 |
 | ③ 生产部署授权 | 生产 owner（Kara） | 明确指定要部署的 commit SHA | 生产跑上新版本 |
 
 **任何一道没过，下一道就不许开始。**
@@ -54,7 +54,7 @@ gh pr checks <N> --watch
 
 - 用 **Squash merge**（保持 `main` 历史线性）。
 - PR 标题用 Conventional Commits 前缀（`feat:` `fix:` `docs:` `test:` `ci:`）。
-- **未经 owner 批准不要自行 merge。** Agent 的默认动作是「开 PR 并停下」。
+- 用户交办范围内，Agent 按 [AGENTS.md 的检查和授权条件](../AGENTS.md#6-关键区分开发完成--pr-合并--生产部署) 完成合并。合并前须取得 GitHub 要求的真实独立审核。
 
 ---
 

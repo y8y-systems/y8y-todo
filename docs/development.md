@@ -57,8 +57,7 @@ gh pr checks --watch              # 等 CI
 
 **建 PR 的身份**：PR 作者决定谁能 Approve —— 作者不能 Approve 自己建的 PR。
 Agent 建的 PR 应当用**独立于人工审批者**的身份，这样评审才成立。
-你的 Agent 环境如果提供了专用身份工具，就用它；没有的话用自己的账号建 PR
-也能工作，只是**你自己不能批这个 PR**，需要另一位有权限的人来批。
+使用 Agent 环境提供的独立身份工具。若该身份不可用，先解决身份问题。
 详见 [AGENTS.md §2.1](../AGENTS.md)。
 
 **不要 `git add -A`。** 这个仓库有 `vendor/`、`docs/font-migration/*.png`（几十 KB
@@ -211,7 +210,7 @@ bash scripts/check-ci-gates.sh     # 提交前自查
 
 ---
 
-开发完成 ──▶ PR ──▶ CI 全绿 ──▶ 【人工批准】──▶ merge 到 main
+开发完成 ──▶ PR ──▶ CI 全绿 ──▶ 【独立审核通过】──▶ merge 到 main
                                                       │
                                                       ▼
                                        【另行授权】生产部署
