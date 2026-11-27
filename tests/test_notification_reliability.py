@@ -17,6 +17,7 @@ import os
 import stat
 import sys
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -119,6 +120,8 @@ def _scheduler(data_dir, provider, now, settings=None, **env_extra):
         assert err is None, err
         settings_store.set(user, normalized)
     state_store = StateStore(os.path.join(state_dir, 'notification_state.json'))
+    # Retention and the scheduler must use the same simulated date.
+    state_store.prune = partial(state_store.prune, now=now)
     config = _make_config(data_dir, **env_extra)
     return Scheduler(data_dir, config, providers={'line': provider},
                      settings_store=settings_store, state_store=state_store,
